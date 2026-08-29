@@ -132,12 +132,17 @@ main {
   padding: 18px 22px 35vh;
 }
 
-#lines, #hint {
-  max-width: 780px;
-  margin: 0 auto;
+/* The document is variable-width: left-aligned, sized to its longest line
+   (so results form a column just past the expressions), growing up to the
+   full canvas on wide screens. */
+#lines {
+  width: fit-content;
+  min-width: min(100%, 640px);
+  max-width: 100%;
 }
 
 #hint {
+  max-width: 640px;
   color: var(--muted);
   font-size: 14px;
   line-height: 1.5;
@@ -454,8 +459,7 @@ main {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  max-width: 780px;
-  margin: 0 auto 12px;
+  margin: 0 0 12px;
   padding: 2px 0 10px;
   background: var(--bg);
 }
