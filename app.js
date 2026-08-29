@@ -1467,12 +1467,6 @@ function render() {
     if (line.kind === 'comp') {
       toks.className = 'tokens comp';
       PART_KEYS.forEach((k, pi) => {
-        if (pi) {
-          const sep = document.createElement('span');
-          sep.className = 'csep';
-          sep.textContent = '×';
-          toks.appendChild(sep);
-        }
         const focus = isActive && state.part === k;
         const f = document.createElement('span');
         f.className = 'cfield' + (focus ? ' focus' : '');
@@ -1497,7 +1491,18 @@ function render() {
           body.appendChild(ph);
         }
         f.appendChild(body);
-        toks.appendChild(f);
+        // The "×" separator wraps together with the field it precedes.
+        if (pi) {
+          const grp = document.createElement('span');
+          grp.className = 'cgroup';
+          const sep = document.createElement('span');
+          sep.className = 'csep';
+          sep.textContent = '×';
+          grp.append(sep, f);
+          toks.appendChild(grp);
+        } else {
+          toks.appendChild(f);
+        }
       });
     } else {
       toks.className = 'tokens';

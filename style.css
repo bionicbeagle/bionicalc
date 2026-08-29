@@ -300,6 +300,11 @@ main {
   padding: 2px 0;
 }
 
+.cgroup {
+  display: flex;
+  align-items: flex-end;
+}
+
 .csep {
   color: var(--muted);
   font-weight: 400;
