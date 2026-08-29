@@ -3,6 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="BioniCalc">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)">
 <title>BioniCalc</title>
 <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="82" font-size="82">🧮</text></svg>'>
 <link rel="stylesheet" href="style.css">
@@ -30,9 +36,9 @@
       result is referenced. Undo any change with ⌘Z / Ctrl+Z.<br><br>
       Drag the <b>⠿</b> handle (or press ⌥↑ / ⌥↓) to <b>reorder</b> lines — references
       stay live wherever their lines sit.<br><br>
-      Type a <b>unit</b> after a value: 12cm + 30mm = 15 cm, 100km / 2h = 50 km/h.
-      A unit typed after a reference converts it (mm, cm, m, km, in, ft, yd, mi ·
-      mg, g, kg, oz, lb, t · ms, s, min, h, d · ml, cl, dl, l, gal).
+      Add a <b>unit</b> after a value — type it, or use the unit row on the pad
+      (… shows all of them): 12cm + 30mm = 15 cm, 100km / 2h = 50 km/h.
+      A unit after a reference converts it.
     </p>
   </section>
 
@@ -63,7 +69,15 @@
       <button class="key fn" data-key="%">%</button>
       <button class="key op" data-key="+">+</button>
     </div>
+    <div id="unitbar">
+      <button class="key ukey" data-key="unit:mm">mm</button>
+      <button class="key ukey" data-key="unit:cm">cm</button>
+      <button class="key ukey" data-key="unit:m">m</button>
+      <button class="key ukey" data-key="unit:in">in</button>
+      <button class="key ukey" id="more-units" title="All units">…</button>
+    </div>
     <button id="newline" class="key" data-key="enter">new line&ensp;⏎</button>
+    <div id="unitpop" hidden></div>
   </aside>
 </main>
 

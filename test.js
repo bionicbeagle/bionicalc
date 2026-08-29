@@ -273,4 +273,35 @@ t('(() => { const src = state.lines[state.lines.length - 3]; const b = snapshot(
 check('frozen with unit intact', lastVal(), '152 mm');
 check('frozen tokens are number + unit', t('state.lines[state.lines.length - 2].tokens.slice(0, 2).map((x) => x.t).join("")'), 'nu');
 
+// 32. Tapped units (keypad): insert, swap, and quick-row promotion
+NL();
+keys(['5', 'unit:cm']);
+check('5 + tap cm', lastVal(), '5 cm');
+keys(['unit:mm']);
+check('tapping another unit swaps it', lastVal(), '5 mm');
+keys(['unit:kg']);
+check('swap across dimensions too', lastVal(), '5 kg');
+check('quick row is most-recently-used', t('JSON.stringify(quickUnits)'), '["kg","mm","cm","m"]');
+
+// 33. Tapped unit coalesces with the number for undo
+const uStack = t('undoStack.length');
+NL();
+keys(['7', 'unit:km']);
+check('number + tapped unit = one undo step', t('undoStack.length'), uStack + 2); // NL + typing run
+t('undo()');
+check('one undo clears both', t('state.lines[state.lines.length - 1].tokens.length'), 0);
+
+// 34. Tapped unit after a reference converts it
+NL();
+keys(['2', 'm']);
+NL();
+t('insertRefFrom(state.lines[state.lines.length - 2].id)');
+keys(['unit:cm']);
+check('[2 m] tap cm converts', lastVal(), '200 cm');
+
+// 35. Tapping a unit on an empty line is a no-op
+NL();
+keys(['unit:cm']);
+check('unit tap needs a value first', t('state.lines[state.lines.length - 1].tokens.length'), 0);
+
 process.exit(failures ? 1 : 0);

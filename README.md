@@ -20,7 +20,9 @@ Calculations form a flowing document instead of a single display:
   dependent results update on the fly.
 - **Hover to trace.** Hovering a result highlights every reference to it across the
   document (and hovering a reference chip lights up its source), in the line's color.
-- **Units.** Type a unit after a value (keyboard entry): `12cm + 30mm = 15 cm`. Mixed
+- **Units.** Add a unit after a value — type it, or tap it on the keypad's quick-unit
+  row (the four most recently used units; "…" opens the full grouped list):
+  `12cm + 30mm = 15 cm`. Mixed
   units of one dimension convert automatically (the left unit wins), unitless operands
   adopt the other side's unit, and `×`/`÷` compose and cancel: `2cm × 3cm = 6 cm²`,
   `100km / 2h = 50 km/h`, `1m / 50cm = 2`. Volumes are length³, so `2cm × 3cm × 4cm +

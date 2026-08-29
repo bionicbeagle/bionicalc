@@ -36,6 +36,8 @@ html, body {
   overscroll-behavior: none;
 }
 
+html { touch-action: manipulation; }
+
 body {
   display: flex;
   flex-direction: column;
@@ -46,6 +48,7 @@ body {
   -webkit-user-select: none;
   user-select: none;
   -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
 }
 
 /* ---------- header ---------- */
@@ -424,13 +427,14 @@ main {
 /* ---------- keypad ---------- */
 
 #pad {
+  position: relative;
   width: 330px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
   gap: 10px;
-  padding: 16px;
+  padding: 16px calc(16px + env(safe-area-inset-right, 0px)) 16px 16px;
   background: var(--panel);
   border-left: 1px solid var(--border);
 }
@@ -468,6 +472,20 @@ main {
   font-weight: 500;
 }
 
+#unitbar {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+}
+
+.ukey {
+  height: 44px;
+  font-size: 16px;
+  font-weight: 500;
+  background: var(--key-fn);
+  color: var(--text);
+}
+
 #newline {
   height: 52px;
   background: var(--accent);
@@ -475,6 +493,38 @@ main {
   font-size: 17px;
   font-weight: 600;
 }
+
+#unitpop {
+  position: absolute;
+  left: 12px;
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  bottom: 132px;
+  z-index: 20;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: 0 14px 44px rgba(0, 0, 0, 0.28);
+  padding: 6px 14px 14px;
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+}
+
+#unitpop h3 {
+  margin: 12px 2px 7px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+#unitpop .ubtns {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+#unitpop .ukey { height: 42px; }
 
 /* ---------- toast ---------- */
 
@@ -514,6 +564,13 @@ main {
   }
 
   .key { height: 52px; }
+  .ukey { height: 42px; }
   .line { font-size: 23px; min-height: 48px; }
   .result { font-size: 21px; }
+
+  #unitpop {
+    bottom: 120px;
+    left: 12px;
+    right: 12px;
+  }
 }

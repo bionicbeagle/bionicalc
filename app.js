@@ -85,6 +85,14 @@ let lastKindLine = null;
 let labelEditId = null;   // line whose label is being edited (transient)
 let labelEditSnap = null; // snapshot from when that edit started
 
+// Most-recently-used units shown on the keypad's quick row. A preference,
+// not document state: persisted, but deliberately outside undo snapshots.
+let quickUnits = ['mm', 'cm', 'm', 'in'];
+
+function promoteQuickUnit(sym) {
+  quickUnits = [sym, ...quickUnits.filter((s) => s !== sym)].slice(0, 4);
+}
+
 const activeLine = () => state.lines.find((l) => l.id === state.activeId);
 const activeIndex = () => state.lines.findIndex((l) => l.id === state.activeId);
 
@@ -405,6 +413,16 @@ function inputOp(op) {
   insertToken({ t: 'o', v: op });
 }
 
+// Tap a unit key: insert a whole unit token, or swap the one already there
+// (tapping cm then mm should correct the unit, not concatenate letters).
+function inputUnit(sym) {
+  const line = activeLine();
+  if (state.sel) { state.caret = state.sel.idx + 1; state.sel = null; }
+  const prev = line.tokens[state.caret - 1];
+  if (prev && prev.t === 'u') { prev.v = sym; return; }
+  if (isValue(prev)) insertToken({ t: 'u', v: sym });
+}
+
 // Letters typed after a value build a unit token, validated live: a letter
 // is accepted only while the string remains a prefix of some known unit.
 function inputUnitLetter(ch) {
@@ -702,7 +720,7 @@ function press(key) {
     else if (key === 'right') moveLR(1);
     else if (key === 'up') moveUD(-1);
     else if (key === 'down') moveUD(1);
-    else deselect();
+    else { deselect(); closeUnitPop(); }
     breakCoalescing();
     update();
     return;
@@ -710,7 +728,13 @@ function press(key) {
   commitLabelEditFromDom();
   const before = snapshot();
   let kind = null;
-  if (/^[0-9.]$/.test(key)) { inputDigit(key); kind = 'digit'; }
+  if (key.startsWith('unit:')) {
+    const sym = key.slice(5);
+    inputUnit(sym);
+    promoteQuickUnit(sym);
+    kind = 'digit';
+  }
+  else if (/^[0-9.]$/.test(key)) { inputDigit(key); kind = 'digit'; }
   else if (/^[a-z]$/.test(key)) { inputUnitLetter(key); kind = 'digit'; }
   else if (key === '+' || key === '-' || key === '*' || key === '/') inputOp(key);
   else if (key === '%') inputPercent();
@@ -891,6 +915,14 @@ function render() {
   undoBtn.disabled = !undoStack.length;
   redoBtn.disabled = !redoStack.length;
 
+  document.getElementById('unitbar').querySelectorAll('.ukey[data-key]').forEach((b, i) => {
+    const sym = quickUnits[i];
+    if (sym) {
+      b.dataset.key = 'unit:' + sym;
+      b.textContent = sym;
+    }
+  });
+
   if (labelEditId !== null) {
     const inp = linesEl.querySelector('.label-input');
     if (inp) {
@@ -923,14 +955,21 @@ function render() {
 let hoverRefId = null;
 
 // Re-applied after every render so the highlight survives re-renders while
-// the pointer rests on a chip or result.
+// the pointer rests on a chip or result. Without a hover (touch devices),
+// a selected reference chip highlights its family instead — tracing works
+// by tapping the chip, the same gesture that selects it.
 function applyRefHighlight() {
   linesEl.querySelectorAll('.hl').forEach((el) => el.classList.remove('hl'));
-  if (hoverRefId === null) return;
-  const chips = linesEl.querySelectorAll(`.tok.ref[data-ref="${hoverRefId}"]`);
+  let id = hoverRefId;
+  if (id === null && state.sel) {
+    const tok = activeLine()?.tokens[state.sel.idx];
+    if (tok && tok.t === 'r') id = tok.ref;
+  }
+  if (id === null) return;
+  const chips = linesEl.querySelectorAll(`.tok.ref[data-ref="${id}"]`);
   if (!chips.length) return; // an unreferenced result has nothing to connect
   chips.forEach((el) => el.classList.add('hl'));
-  const src = linesEl.querySelector(`.line[data-id="${hoverRefId}"] .result`);
+  const src = linesEl.querySelector(`.line[data-id="${id}"] .result`);
   if (src) src.classList.add('hl');
 }
 
@@ -950,6 +989,7 @@ function save() {
       colors: state.colors,
       nextId: state.nextId,
       nextColor: state.nextColor,
+      quickUnits,
     }));
   } catch { /* storage unavailable — run without persistence */ }
 }
@@ -957,6 +997,10 @@ function save() {
 function load() {
   try {
     const d = JSON.parse(localStorage.getItem(STORE_KEY));
+    if (d && Array.isArray(d.quickUnits)) {
+      const valid = d.quickUnits.filter((s) => UNITS[s]);
+      if (valid.length) quickUnits = valid.slice(0, 4);
+    }
     if (d && Array.isArray(d.lines) && d.lines.length) {
       state.lines = d.lines;
       state.colors = d.colors || {};
@@ -1175,7 +1219,55 @@ window.addEventListener('pointerup', () => {
 });
 pad.addEventListener('click', (e) => {
   const b = e.target.closest('button[data-key]');
-  if (b) press(b.dataset.key);
+  if (b) {
+    press(b.dataset.key);
+    if (b.dataset.key.startsWith('unit:')) closeUnitPop();
+  }
+});
+
+/* ---- unit popover: every unit, grouped by dimension ---- */
+
+const unitPop = document.getElementById('unitpop');
+
+function closeUnitPop() {
+  unitPop.hidden = true;
+}
+
+{
+  const groups = [
+    ['Length', { L: 1 }],
+    ['Mass', { M: 1 }],
+    ['Time', { T: 1 }],
+    ['Volume', { L: 3 }],
+  ];
+  for (const [label, dim] of groups) {
+    const g = document.createElement('div');
+    g.className = 'ugroup';
+    const h = document.createElement('h3');
+    h.textContent = label;
+    g.appendChild(h);
+    const row = document.createElement('div');
+    row.className = 'ubtns';
+    for (const sym of UNIT_NAMES) {
+      if (!sameDim(UNITS[sym].dim, dim)) continue;
+      const b = document.createElement('button');
+      b.className = 'key ukey';
+      b.dataset.key = 'unit:' + sym;
+      b.textContent = sym;
+      row.appendChild(b);
+    }
+    g.appendChild(row);
+    unitPop.appendChild(g);
+  }
+}
+
+document.getElementById('more-units').addEventListener('click', () => {
+  unitPop.hidden = !unitPop.hidden;
+});
+
+window.addEventListener('pointerdown', (e) => {
+  if (unitPop.hidden || !e.target.closest) return;
+  if (!e.target.closest('#unitpop') && !e.target.closest('#more-units')) closeUnitPop();
 });
 
 const undoBtn = document.getElementById('undo');
