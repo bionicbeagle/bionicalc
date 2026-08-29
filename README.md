@@ -75,9 +75,20 @@ Calculations form a flowing document instead of a single display:
   panel, per project, default 3 mm — consumed between neighbouring pieces as real
   geometry. The planner searches candidate layouts (each part type facing either way,
   same-height-only strips vs. mixed) and keeps the winner by fewest unplaced pieces,
-  fewest sheets, **fewest saw cuts**, shortest packed height — so identical parts end up
-  side by side in uniform strips. Layouts render as to-scale SVG diagrams per stock
-  sheet with utilization and cut count; pieces that fit nowhere are called out in red.
+  fewest sheets, fewest risky edges, **fewest saw cuts**, shortest packed height — so
+  identical parts end up side by side in uniform strips. Layouts render as to-scale SVG
+  diagrams per stock sheet with utilization and cut count; pieces that fit nowhere are
+  called out in red.
+- **Two saws.** Set the table saw's **max workpiece size** (width × height, either way
+  round; blank = unlimited) and a **tracksaw** appears for breaking down anything
+  bigger. Tracksaw work is minimized: an over-capacity sheet is first divided by the
+  **fewest possible breakdown cuts** — usually a single crosscut into two panels that
+  each fit the table saw (a half-sheet-capable saw needs exactly one) — and since both
+  sides of a breakdown cut get re-cut later, it needs no margin and finishes no edge.
+  Where a finished edge does need the tracksaw, the cut is made oversize by the
+  **defensive margin** and cleaned up on the table saw; edges that can't come down to
+  capacity at all are flagged **⚠ risky**. The optimizer scores risky edges, then
+  tracksaw operations, ahead of the total cut count.
 - **Cut list.** Under each diagram, a collapsible numbered list of the actual saw work:
   rip the strips off top to bottom, crosscut each strip left to right (identical cuts
   grouped into one step: `crosscut 900 mm × 2`), then any trims. Every printed dimension
@@ -134,8 +145,8 @@ coalescing, line deletion freezing/restoring references, units and powered suffi
 component blanks (entry flow, unit adoption, volume references, freezing, import),
 projects/sheets/cross-sheet references, storage migration, number formatting, and the
 Cuts page: thickness grouping and stock matching, kerf, grain rules, layout
-optimization (uniform strips, forced rotation, overflow, stock order), and cut-list
-generation.
+optimization (uniform strips, forced rotation, overflow, stock order), two-saw
+planning (capacity, tracksaw margins, risky-edge flags), and cut-list generation.
 
 ## License & author
 

@@ -1155,12 +1155,22 @@ function cutsData(p) {
     })
     .map(([, g]) => g);
 
-  const kerf = kerfOf(p);
+  const cap = capOf(p);
+  const saws = {
+    kerf: kerfOf(p) / 1000,
+    tkKerf: tkKerfOf(p) / 1000,
+    margin: tkMarginOf(p) / 1000,
+    capW: cap.w === null ? Infinity : cap.w / 1000,
+    capH: cap.h === null ? Infinity : cap.h / 1000,
+  };
   for (const g of groups) {
-    if (g.matched) g.plan = planCuts(g.parts, g.stock, kerf / 1000);
+    if (g.matched) g.plan = planCuts(g.parts, g.stock, saws);
   }
 
-  return { parts, groups, stock, partsVol, stockVol, pieces, kerf };
+  return {
+    parts, groups, stock, partsVol, stockVol, pieces,
+    kerf: kerfOf(p), tkKerf: tkKerfOf(p), tkMargin: tkMarginOf(p), cap,
+  };
 }
 
 // Volumes on the Cuts page: liters from 1 l up, cm³ below.
@@ -1168,16 +1178,54 @@ function fmtVol(si) {
   return si >= 1e-3 ? fmt(si / 1e-3) + ' l' : fmt(si / 1e-6) + ' cm³';
 }
 
-// Saw kerf — the blade width lost to every cut — in mm, per project.
+/*
+ * Saw settings, per project, all in mm. `kerf` is the table saw blade.
+ * When a table saw CAPACITY is set (max workpiece width/height it can
+ * handle, either way round; blank = unlimited), a second saw appears: any
+ * cut whose workpiece is over capacity is made with the TRACKSAW — its own
+ * kerf, plus a defensive oversize margin that a table saw pass cleans up
+ * once the piece is down to size. Edges that even the tracksaw must finish
+ * (the piece itself is over capacity) are flagged as accuracy risks.
+ */
 const kerfOf = (p) =>
   typeof p.kerf === 'number' && isFinite(p.kerf) ? p.kerf : 3;
+const tkKerfOf = (p) =>
+  typeof p.tkKerf === 'number' && isFinite(p.tkKerf) ? p.tkKerf : 2.2;
+const tkMarginOf = (p) =>
+  typeof p.tkMargin === 'number' && isFinite(p.tkMargin) ? p.tkMargin : 10;
+const capOf = (p) => ({
+  w: typeof p.tsCapW === 'number' && isFinite(p.tsCapW) ? p.tsCapW : null,
+  h: typeof p.tsCapH === 'number' && isFinite(p.tsCapH) ? p.tsCapH : null,
+});
 
-function setKerf(v) {
+function setSaw(field, v, lo, hi, blankClears) {
   const p = currentProject();
   if (!p) return;
   const n = parseFloat(v);
-  p.kerf = isFinite(n) ? Math.max(0, Math.min(20, n)) : 3;
+  if (!isFinite(n)) {
+    if (blankClears) delete p[field];
+  } else {
+    p[field] = Math.max(lo, Math.min(hi, n));
+  }
   update();
+}
+
+const setKerf = (v) => setSaw('kerf', v, 0, 20, false);
+const setTkKerf = (v) => setSaw('tkKerf', v, 0, 20, false);
+const setTkMargin = (v) => setSaw('tkMargin', v, 0, 50, false);
+const setCapW = (v) => setSaw('tsCapW', v, 10, 10000, true);
+const setCapH = (v) => setSaw('tsCapH', v, 10, 10000, true);
+
+// Saw fields worth carrying through storage migration and import.
+function sawSettings(src) {
+  const clamp = { kerf: [0, 20], tkKerf: [0, 20], tkMargin: [0, 50], tsCapW: [10, 10000], tsCapH: [10, 10000] };
+  const out = {};
+  for (const [k, [lo, hi]] of Object.entries(clamp)) {
+    if (typeof src[k] === 'number' && isFinite(src[k])) {
+      out[k] = Math.max(lo, Math.min(hi, src[k]));
+    }
+  }
+  return out;
 }
 
 /*
@@ -1187,18 +1235,60 @@ function setKerf(v) {
  * consumed between neighbours), but the planner searches several candidate
  * layouts — each part type facing either way, strips that only accept
  * same-height pieces vs. strips that mix — and keeps the winner by: fewest
- * unplaced pieces, then fewest stock sheets, then fewest estimated saw
- * cuts, then shortest packed height. That is what puts identical parts
- * next to each other in uniform strips instead of scattering them.
+ * unplaced pieces, then fewest stock sheets, then fewest tracksaw-finished
+ * edges (accuracy risks), then fewest saw cuts, then shortest packed
+ * height. That is what puts identical parts next to each other in uniform
+ * strips.
+ *
+ * Two saws: every cut is assigned by the size of the workpiece it is cut
+ * FROM. Within the table saw's capacity the table saw makes it (kerf).
+ * Over capacity the tracksaw makes it, oversize by the defensive margin,
+ * and a table saw pass cleans the edge up once the piece is down to size;
+ * when even the finished piece is over capacity the tracksaw cut is final
+ * and flagged risky. With no capacity configured everything is the table
+ * saw and the margin machinery is inert.
+ *
+ * Tracksaw work is MINIMIZED: candidate layouts include a breakdown
+ * pre-pass that divides an over-capacity sheet with the fewest possible
+ * tracksaw cuts (usually one) into panels that each fit the table saw —
+ * both sides of a breakdown cut are re-cut later, so it needs no margin
+ * and finishes no edge — and the tracksaw-operation count is scored right
+ * after risky edges, ahead of the total cut count.
  *
  * Grain rules: a part that doesn't care may face either way; a grain-set
  * part rotates only to align with grain-set stock, and keeps its authored
  * orientation on stock without grain. Stock is used in Cuts-page line
  * order (drag lines to change priority), each line expanded by its
  * quantity. Everything is SI; pieces that fit nowhere come back in
- * `unplaced`.
+ * `unplaced`. planCuts also accepts a plain kerf number as its third
+ * argument — single-saw mode.
  */
-function planCuts(parts, stock, kerf) {
+
+// Which saw handles a workpiece of w × h: the table saw when it fits the
+// capacity either way round, otherwise the tracksaw.
+function cutTool(saws, w, h) {
+  const E = 1e-9;
+  return (w <= saws.capW + E && h <= saws.capH + E)
+    || (h <= saws.capW + E && w <= saws.capH + E) ? 'table' : 'track';
+}
+
+// One separating cut: the tool (by workpiece size), the kerf it eats, the
+// defensive margin left on the piece, whether a table saw pass cleans it
+// up (needs the oversize piece to fit capacity), or whether the edge stays
+// tracksaw-finished — risky.
+function sepCut(saws, wpW, wpH, overW, overH) {
+  if (cutTool(saws, wpW, wpH) === 'table') {
+    return { tool: 'table', kerf: saws.kerf, margin: 0, finish: false, risky: false };
+  }
+  return cutTool(saws, overW, overH) === 'table'
+    ? { tool: 'track', kerf: saws.tkKerf, margin: saws.margin, finish: true, risky: false }
+    : { tool: 'track', kerf: saws.tkKerf, margin: 0, finish: false, risky: true };
+}
+
+function planCuts(parts, stock, sawsIn) {
+  const saws = typeof sawsIn === 'number'
+    ? { kerf: sawsIn, tkKerf: sawsIn, margin: 0, capW: Infinity, capH: Infinity }
+    : { capW: Infinity, capH: Infinity, ...sawsIn };
   const EPS = 1e-9;
   const TOL = 1e-6;
   const axis = (g) => (g === 'w' ? 'x' : g === 'h' ? 'y' : null);
@@ -1221,6 +1311,68 @@ function planCuts(parts, stock, kerf) {
     }
   }
 
+  /*
+   * Breakdown pre-pass: an over-capacity sheet is divided by the FEWEST
+   * possible tracksaw cuts — along whichever axis needs fewer — into
+   * panels that each fit the table saw. Both sides of a breakdown cut get
+   * re-cut later, so it needs no margin and finishes no edge. 'even'
+   * splits equally, 'greedy' takes full-capacity bites first.
+   */
+  const spanCap = (across) => Math.max(
+    across <= saws.capW + EPS ? saws.capH : 0,
+    across <= saws.capH + EPS ? saws.capW : 0);
+  const nSpans = (total, cap) => Math.ceil((total + saws.tkKerf) / (cap + saws.tkKerf) - EPS);
+  const spans = (total, cap, mode) => {
+    const n = nSpans(total, cap);
+    if (mode === 'greedy') {
+      const out = [];
+      let left = total;
+      for (let i = 0; i < n - 1; i++) { out.push(cap); left -= cap + saws.tkKerf; }
+      if (left > 1e-3) return [...out, left];
+    }
+    // Even split, snapped to whole millimetres for the tracksaw measurement
+    // (the last panel absorbs the remainder).
+    const even = (total - (n - 1) * saws.tkKerf) / n;
+    const h = Math.min(cap, Math.round(even * 1000) / 1000);
+    const last = total - (n - 1) * (h + saws.tkKerf);
+    if (last < 1e-3 || last > cap + EPS) return Array.from({ length: n }, () => even);
+    return [...Array.from({ length: n - 1 }, () => h), last];
+  };
+  const mkPanel = (x0, y0, W, H) =>
+    ({ x0, y0, W, H, shelves: [], placed: [], area: 0, nextY: 0 });
+  const canSplit = (inst) =>
+    cutTool(saws, inst.W, inst.H) === 'track'
+    && (spanCap(inst.W) > 0 || spanCap(inst.H) > 0);
+
+  const buildRec = (inst, split) => {
+    const rec = {
+      stock: inst.stock, index: inst.index, W: inst.W, H: inst.H,
+      grain: inst.grain, breaks: [], panels: [],
+    };
+    if (split && canSplit(inst)) {
+      const bc = spanCap(inst.W); // bands: full width, split the height
+      const cc = spanCap(inst.H); // columns: full height, split the width
+      const nB = bc > 0 ? nSpans(inst.H, bc) : Infinity;
+      const nC = cc > 0 ? nSpans(inst.W, cc) : Infinity;
+      const bands = nB <= nC;
+      const sp = spans(bands ? inst.H : inst.W, bands ? bc : cc, split);
+      let pos = 0;
+      sp.forEach((s, i) => {
+        rec.panels.push(bands
+          ? mkPanel(0, pos, inst.W, s)
+          : mkPanel(pos, 0, s, inst.H));
+        if (i < sp.length - 1) {
+          rec.breaks.push(bands
+            ? { axis: 'h', at: s, pos: pos + s, wpW: inst.W, wpH: inst.H - pos, panel: i + 1 }
+            : { axis: 'v', at: s, pos: pos + s, wpW: inst.W - pos, wpH: inst.H, panel: i + 1 });
+        }
+        pos += s + saws.tkKerf;
+      });
+    }
+    if (!rec.panels.length) rec.panels.push(mkPanel(0, 0, inst.W, inst.H));
+    return rec;
+  };
+
   // Legal orientations on a given sheet: 'A' keeps the authored w×h, 'R'
   // swaps them.
   const orients = (ty, sg) => {
@@ -1230,7 +1382,7 @@ function planCuts(parts, stock, kerf) {
   };
   const dims = (ty, o) => (o === 'A' ? { w: ty.aw, h: ty.ah } : { w: ty.ah, h: ty.aw });
 
-  function layout(pref, strict) {
+  function layout(pref, strict, split) {
     const pieces = [];
     for (const ty of types) {
       const d = dims(ty, pref.get(ty) || 'A');
@@ -1238,85 +1390,132 @@ function planCuts(parts, stock, kerf) {
     }
     pieces.sort((a, b) => b.ph - a.ph || b.pw - a.pw);
 
-    const sheets = [];
+    const opened = [];
     const avail = instances.slice();
     const unplaced = [];
 
-    const tryPlace = (S, pw, ph) => {
-      for (const shelf of S.shelves) {
+    const tryPlace = (P, pw, ph) => {
+      for (const shelf of P.shelves) {
         const fitH = strict ? Math.abs(shelf.h - ph) < TOL : ph <= shelf.h + EPS;
-        const x = shelf.xUsed + (shelf.xUsed > 0 ? kerf : 0);
-        if (fitH && x + pw <= S.W + EPS) return { shelf, x, y: shelf.y };
+        if (fitH && shelf.nextX + pw <= P.W + EPS) return { shelf, x: shelf.nextX, y: shelf.y };
       }
-      const y = S.yUsed + (S.yUsed > 0 ? kerf : 0);
-      if (y + ph <= S.H + EPS && pw <= S.W + EPS) return { shelf: null, x: 0, y };
-      return null;
+      // a new strip below the last one
+      const y = P.nextY;
+      if (pw > P.W + EPS || y + ph > P.H + EPS) return null;
+      if (P.H - (y + ph) < TOL) return { shelf: null, x: 0, y, rip: null }; // flush — no rip
+      const rip = sepCut(saws, P.W, P.H - y, P.W, ph + saws.margin);
+      if (y + ph + rip.margin > P.H + EPS) return null;
+      return { shelf: null, x: 0, y, rip };
     };
-    const attempt = (S, piece) => {
-      const legal = orients(piece.ty, S.grain);
+    const attempt = (P, grain, piece) => {
+      const legal = orients(piece.ty, grain);
       const order = legal.length > 1 && legal.includes(piece.o)
         ? [piece.o, legal.find((o) => o !== piece.o)]
         : legal;
       for (const o of order) {
         const d = dims(piece.ty, o);
-        const pl = tryPlace(S, d.w, d.h);
+        const pl = tryPlace(P, d.w, d.h);
         if (pl) return { ...pl, w: d.w, h: d.h, o };
       }
       return null;
     };
-    const commit = (S, pl, piece) => {
+    const commit = (P, pl, piece) => {
       if (!pl.shelf) {
-        pl.shelf = { y: pl.y, h: pl.h, xUsed: 0 };
-        S.shelves.push(pl.shelf);
-        S.yUsed = pl.y + pl.h;
+        pl.shelf = { y: pl.y, h: pl.h, xUsed: 0, nextX: 0, rip: pl.rip };
+        P.shelves.push(pl.shelf);
+        P.nextY = pl.y + pl.h + (pl.rip ? pl.rip.margin + pl.rip.kerf : 0);
       }
-      pl.shelf.xUsed = pl.x + pl.w;
+      const shelf = pl.shelf;
+      const flush = pl.x + pl.w >= P.W - TOL;
+      const cross = flush ? null
+        : sepCut(saws, P.W - pl.x, shelf.h, pl.w + saws.margin, shelf.h);
+      const trim = pl.h < shelf.h - TOL
+        ? (() => {
+          const tool = cutTool(saws, pl.w, shelf.h);
+          return { tool, kerf: tool === 'table' ? saws.kerf : saws.tkKerf, risky: tool === 'track' };
+        })()
+        : null;
+      shelf.xUsed = pl.x + pl.w;
+      shelf.nextX = pl.x + pl.w + (cross ? cross.margin + cross.kerf : 0);
       const g = piece.ty.g;
       const grain = g === null ? null : pl.o === 'A' ? g : g === 'x' ? 'y' : 'x';
-      S.placed.push({ part: piece.ty.part, x: pl.x, y: pl.y, w: pl.w, h: pl.h, grain });
-      S.area += pl.w * pl.h;
+      P.placed.push({ part: piece.ty.part, x: pl.x, y: pl.y, w: pl.w, h: pl.h, grain, cross, trim });
+      P.area += pl.w * pl.h;
     };
 
     for (const piece of pieces) {
       let pl = null;
-      let target = null;
-      for (const S of sheets) {
-        pl = attempt(S, piece);
-        if (pl) { target = S; break; }
+      let panel = null;
+      for (const rec of opened) {
+        for (const P of rec.panels) {
+          pl = attempt(P, rec.grain, piece);
+          if (pl) { panel = P; break; }
+        }
+        if (pl) break;
       }
       if (!pl) {
-        // Open the first remaining sheet with room in a legal orientation.
-        const i = avail.findIndex((inst) => orients(piece.ty, inst.grain).some((o) => {
-          const d = dims(piece.ty, o);
-          return d.w <= inst.W + EPS && d.h <= inst.H + EPS;
-        }));
-        if (i >= 0) {
-          const [inst] = avail.splice(i, 1);
-          target = { ...inst, shelves: [], yUsed: 0, placed: [], area: 0 };
-          sheets.push(target);
-          pl = attempt(target, piece);
+        // Open the first remaining sheet with a panel the piece fits on.
+        for (let i = 0; i < avail.length; i++) {
+          const rec = buildRec(avail[i], split);
+          for (const P of rec.panels) {
+            pl = attempt(P, rec.grain, piece);
+            if (pl) { panel = P; break; }
+          }
+          if (pl) {
+            avail.splice(i, 1);
+            opened.push(rec);
+            break;
+          }
         }
       }
-      if (pl) commit(target, pl, piece);
+      if (pl) commit(panel, pl, piece);
       else unplaced.push({ part: piece.ty.part });
     }
-    return { sheets, unplaced };
+
+    // Aggregate a sheet-coordinate view (diagrams, external checks) on top
+    // of the per-panel layout the cut list consumes.
+    for (const rec of opened) {
+      rec.placed = [];
+      rec.shelves = [];
+      rec.area = 0;
+      rec.panels.forEach((P, pi) => {
+        for (const pl of P.placed) rec.placed.push({ ...pl, x: P.x0 + pl.x, y: P.y0 + pl.y, panel: pi });
+        for (const sf of P.shelves) rec.shelves.push({ ...sf, y: P.y0 + sf.y, panel: pi });
+        rec.area += P.area;
+      });
+    }
+    return { sheets: opened, unplaced };
   }
 
-  // Saw cuts a sheet's layout needs: one rip per strip not ending at the
-  // sheet edge, one crosscut per piece not flush with the right edge, one
-  // trim per piece shorter than its strip.
-  const countCuts = (S) => {
-    let cuts = 0;
-    for (const shelf of S.shelves) {
-      if (shelf.y + shelf.h < S.H - TOL) cuts++;
-      for (const pl of S.placed) {
-        if (Math.abs(pl.y - shelf.y) > TOL) continue;
-        if (pl.x + pl.w < S.W - TOL) cuts++;
-        if (pl.h < shelf.h - TOL) cuts++;
+  // Saw cuts a sheet needs: breakdown cuts, each rip and crosscut, the
+  // clean-up pass when there is one, and each trim. Risky = edges the
+  // tracksaw finishes; trackOps = every cut the tracksaw makes.
+  const countCuts = (rec) => {
+    let cuts = rec.breaks.length;
+    let risky = 0;
+    let track = rec.breaks.length;
+    for (const P of rec.panels) {
+      for (const shelf of P.shelves) {
+        if (shelf.rip) {
+          cuts += 1 + (shelf.rip.finish ? 1 : 0);
+          if (shelf.rip.tool === 'track') track++;
+          if (shelf.rip.risky) risky++;
+        }
+      }
+      for (const pl of P.placed) {
+        if (pl.cross) {
+          cuts += 1 + (pl.cross.finish ? 1 : 0);
+          if (pl.cross.tool === 'track') track++;
+          if (pl.cross.risky) risky++;
+        }
+        if (pl.trim) {
+          cuts += 1;
+          if (pl.trim.tool === 'track') track++;
+          if (pl.trim.risky) risky++;
+        }
       }
     }
-    return cuts;
+    return { cuts, risky, track };
   };
 
   // Candidate orientations: exhaustive over the free (grain-less,
@@ -1338,6 +1537,7 @@ function planCuts(parts, stock, kerf) {
       assignments.push(m);
     }
   }
+  const splits = instances.some(canSplit) ? ['even', 'greedy', null] : [null];
 
   const cmp = (a, b) => {
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
@@ -1346,70 +1546,134 @@ function planCuts(parts, stock, kerf) {
   let best = null;
   let bestKey = null;
   for (const strict of [true, false]) {
-    for (const m of assignments) {
-      const plan = layout(m, strict);
-      for (const S of plan.sheets) S.cuts = countCuts(S);
-      const key = [
-        plan.unplaced.length,
-        plan.sheets.length,
-        plan.sheets.reduce((a, S) => a + S.cuts, 0),
-        plan.sheets.reduce((a, S) => a + S.yUsed, 0),
-      ];
-      if (!best || cmp(key, bestKey) < 0) {
-        best = plan;
-        bestKey = key;
+    for (const split of splits) {
+      for (const m of assignments) {
+        const plan = layout(m, strict, split);
+        let cuts = 0;
+        let risky = 0;
+        let track = 0;
+        for (const rec of plan.sheets) {
+          const c = countCuts(rec);
+          rec.cuts = c.cuts;
+          rec.risky = c.risky;
+          cuts += c.cuts;
+          risky += c.risky;
+          track += c.track;
+        }
+        const key = [
+          plan.unplaced.length,
+          plan.sheets.length,
+          risky,
+          track,
+          cuts,
+          plan.sheets.reduce((a, rec) => a + rec.panels.reduce((b, P) => b + P.nextY, 0), 0),
+        ];
+        if (!best || cmp(key, bestKey) < 0) {
+          best = plan;
+          bestKey = key;
+        }
       }
     }
   }
-  best.cuts = bestKey[2];
+  best.risky = bestKey[2];
+  best.trackOps = bestKey[3];
+  best.cuts = bestKey[4];
   return best;
 }
 
-// The ordered saw work for one planned sheet: rip the strips off top to
-// bottom, then crosscut each strip into its pieces, then trim any piece
-// shorter than its strip. Every fence setting is a finished dimension —
-// the kerf falls on the waste side of the blade. Runs of identical cuts
-// group into one step with a count. Step counts sum to the sheet's cuts.
+// The ordered saw work for one planned sheet: tracksaw breakdown cuts
+// first (both sides get re-cut, so no margin), then per panel: rip the
+// strips off (tracksaw rips are oversize by the margin), the clean-up rip
+// if one is owed, the crosscuts left to right, clean-up passes for
+// tracksaw crosscuts, and trims. Every fence setting is a finished
+// dimension — the kerf falls on the waste side — except tracksaw steps,
+// whose printed size includes the margin. Runs of identical cuts group
+// into one step. Step counts sum to the sheet's cuts.
 function cutList(S) {
   const TOL = 1e-6;
   const steps = [];
-  const shelves = S.shelves.slice().sort((a, b) => a.y - b.y);
-  const inShelf = (shelf) =>
-    S.placed.filter((pl) => Math.abs(pl.y - shelf.y) < TOL).sort((a, b) => a.x - b.x);
-  shelves.forEach((shelf, i) => {
-    if (shelf.y + shelf.h < S.H - TOL) {
+  for (const bk of S.breaks) {
+    steps.push({
+      kind: 'break', at: bk.at, count: 1, tool: 'track', risky: false,
+      dir: bk.axis, wpW: bk.wpW, wpH: bk.wpH, panel: bk.panel,
+      parts: [...new Set(S.panels[bk.panel - 1].placed.map((pl) => pl.part))],
+    });
+  }
+  let stripNo = 0;
+  for (const P of S.panels) {
+    const shelves = P.shelves.slice().sort((a, b) => a.y - b.y);
+    const inShelf = (shelf) =>
+      P.placed.filter((pl) => Math.abs(pl.y - shelf.y) < TOL).sort((a, b) => a.x - b.x);
+    shelves.forEach((shelf) => {
+      shelf.no = ++stripNo;
+      if (!shelf.rip) return;
       steps.push({
-        kind: 'rip', strip: i + 1, at: shelf.h, count: 1,
+        kind: 'rip', strip: shelf.no, at: shelf.h + shelf.rip.margin, count: 1,
+        tool: shelf.rip.tool, margin: shelf.rip.margin, risky: shelf.rip.risky,
+        dir: 'h', wpW: P.W, wpH: P.H - shelf.y,
         parts: [...new Set(inShelf(shelf).map((pl) => pl.part))],
       });
-    }
-  });
-  shelves.forEach((shelf, i) => {
-    let run = null;
-    for (const pl of inShelf(shelf)) {
-      if (pl.x + pl.w >= S.W - TOL) continue; // flush with the edge — no cut
-      if (run && Math.abs(run.at - pl.w) < TOL && run.part === pl.part) run.count++;
-      else {
-        run = { kind: 'cross', strip: i + 1, at: pl.w, count: 1, part: pl.part };
-        steps.push(run);
+    });
+    shelves.forEach((shelf) => {
+      if (shelf.rip && shelf.rip.finish) {
+        steps.push({
+          kind: 'finish', strip: shelf.no, at: shelf.h, count: 1,
+          dir: 'h', wpW: P.W, wpH: shelf.h + shelf.rip.margin,
+          parts: [...new Set(inShelf(shelf).map((pl) => pl.part))],
+        });
       }
-    }
-    for (const pl of inShelf(shelf)) {
-      if (pl.h >= shelf.h - TOL) continue;
-      const ex = steps.find((s) => s.kind === 'trim' && s.strip === i + 1
-        && Math.abs(s.at - pl.h) < TOL && s.part === pl.part);
-      if (ex) ex.count++;
-      else steps.push({ kind: 'trim', strip: i + 1, at: pl.h, count: 1, part: pl.part });
-    }
-  });
+      let run = null;
+      const finishes = [];
+      for (const pl of inShelf(shelf)) {
+        if (!pl.cross) continue; // flush with the edge — no cut
+        const at = pl.w + pl.cross.margin;
+        if (run && Math.abs(run.at - at) < TOL && run.part === pl.part
+          && run.tool === pl.cross.tool) run.count++;
+        else {
+          run = {
+            kind: 'cross', strip: shelf.no, at, count: 1, part: pl.part,
+            tool: pl.cross.tool, margin: pl.cross.margin, risky: pl.cross.risky,
+            dir: 'v', wpW: P.W - pl.x, wpH: shelf.h,
+          };
+          steps.push(run);
+        }
+        if (pl.cross.finish) {
+          const ex = finishes.find((f) => Math.abs(f.at - pl.w) < TOL && f.part === pl.part);
+          if (ex) ex.count++;
+          else {
+            finishes.push({
+              kind: 'finish', strip: shelf.no, at: pl.w, count: 1, part: pl.part,
+              dir: 'v', wpW: pl.w + pl.cross.margin, wpH: shelf.h,
+            });
+          }
+        }
+      }
+      steps.push(...finishes);
+      for (const pl of inShelf(shelf)) {
+        if (!pl.trim) continue;
+        const ex = steps.find((s) => s.kind === 'trim' && s.strip === shelf.no
+          && Math.abs(s.at - pl.h) < TOL && s.part === pl.part);
+        if (ex) ex.count++;
+        else {
+          steps.push({
+            kind: 'trim', strip: shelf.no, at: pl.h, count: 1, part: pl.part,
+            tool: pl.trim.tool, risky: pl.trim.risky,
+            dir: 'h', wpW: pl.w, wpH: shelf.h,
+          });
+        }
+      }
+    });
+  }
   return steps;
 }
 
 // What a planned sheet yields once its cut list is executed: the finished
 // blanks, and the offcuts — one tail per strip beyond its last crosscut,
-// one cutoff per trimmed piece, and the remainder below the last strip.
-// The kerf around each cut is gone; slivers under 1 mm aren't listed.
-function sheetYield(S, kerf) {
+// one cutoff per trimmed piece, and each panel's remainder below its last
+// strip (an untouched panel is one big offcut). The kerf (and any
+// tracksaw margin) around each cut is gone; slivers under 1 mm aren't
+// listed.
+function sheetYield(S) {
   const TOL = 1e-6;
   const MIN = 1e-3 - TOL;
   const parts = [];
@@ -1426,15 +1690,17 @@ function sheetYield(S, kerf) {
     if (ex) ex.count++;
     else offcuts.push({ w, h, count: 1 });
   };
-  for (const shelf of S.shelves) {
-    add(S.W - shelf.xUsed - kerf, shelf.h); // strip tail
-    for (const pl of S.placed) {
-      if (Math.abs(pl.y - shelf.y) < TOL && pl.h < shelf.h - TOL) {
-        add(pl.w, shelf.h - pl.h - kerf);   // trim cutoff
+  for (const P of S.panels) {
+    for (const shelf of P.shelves) {
+      add(P.W - shelf.nextX, shelf.h); // strip tail
+      for (const pl of P.placed) {
+        if (pl.trim && Math.abs(pl.y - shelf.y) < TOL) {
+          add(pl.w, shelf.h - pl.h - pl.trim.kerf); // trim cutoff
+        }
       }
     }
+    add(P.W, P.H - P.nextY); // below the panel's last strip
   }
-  add(S.W, S.H - S.yUsed - kerf);           // below the last strip
   offcuts.sort((a, b) => b.w * b.h - a.w * a.h);
   return { parts, offcuts };
 }
@@ -1728,9 +1994,7 @@ function importProjectsFromData(d) {
       sheets,
       currentSheetId: sheets[0].id,
       nextSheetId: sheetId,
-      ...(typeof p.kerf === 'number' && isFinite(p.kerf)
-        ? { kerf: Math.max(0, Math.min(20, p.kerf)) }
-        : {}),
+      ...sawSettings(p),
     });
   }
   if (!added.length) return 0;
@@ -2316,7 +2580,7 @@ function partName(part) {
 const cutListOpen = new Set();
 
 // One stock sheet's layout as SVG, sized in mm so strokes stay proportional.
-function sheetDiagram(sh, multi, key, kerf) {
+function sheetDiagram(sh, multi, key) {
   const wrap = document.createElement('div');
   wrap.className = 'cutsheet';
   const W = sh.W * 1000;
@@ -2352,6 +2616,17 @@ function sheetDiagram(sh, multi, key, kerf) {
     return out;
   };
   if (sh.grain) for (const ln of grainLines(0, 0, W, H, sh.grain, 'sheetgrain')) svg.appendChild(ln);
+  // Tracksaw breakdown cuts dividing the sheet into table-saw panels.
+  for (const bk of (sh.breaks || [])) {
+    const pos = bk.pos * 1000;
+    svg.appendChild(svgEl('line', {
+      ...(bk.axis === 'h'
+        ? { x1: 0, y1: pos, x2: W, y2: pos }
+        : { x1: pos, y1: 0, x2: pos, y2: H }),
+      class: 'breakline', 'stroke-width': sw * 1.4,
+      'stroke-dasharray': `${sw * 5} ${sw * 4}`,
+    }));
+  }
   for (const pl of sh.placed) {
     const color = partColor(pl.part);
     const x = pl.x * 1000;
@@ -2409,27 +2684,54 @@ function sheetDiagram(sh, multi, key, kerf) {
       });
       return out;
     };
-    for (const st of steps) {
+    steps.forEach((st, si) => {
       const li = document.createElement('li');
+      if (st.risky) li.className = 'risky';
+      // Each step expands into a schematic of what the cut does.
+      const stepDet = document.createElement('details');
+      stepDet.className = 'step';
+      const skey = key + '#' + si;
+      stepDet.open = cutListOpen.has(skey);
+      stepDet.addEventListener('toggle', () => {
+        if (stepDet.open) cutListOpen.add(skey);
+        else cutListOpen.delete(skey);
+      });
+      const sum2 = document.createElement('summary');
+      sum2.title = 'Show this cut';
       const b = document.createElement('b');
       b.textContent = mm(st.at);
-      if (st.kind === 'rip') {
-        li.append('rip ', b, ` → strip ${st.strip} · `, names(st.parts));
+      const track = st.tool === 'track';
+      const saw = track ? (st.risky ? '⚠ tracksaw ' : 'tracksaw ') : '';
+      const over = track && st.margin
+        ? ` (${fmt((st.at - st.margin) * 1000)} + ${fmt(st.margin * 1000)})`
+        : '';
+      if (st.kind === 'break') {
+        sum2.append('tracksaw break ', b, ` → panel ${st.panel} · `, names(st.parts));
+      } else if (st.kind === 'rip') {
+        sum2.append(saw + 'rip ', b, over, ` → strip ${st.strip} · `, names(st.parts));
+      } else if (st.kind === 'finish') {
+        sum2.append(`strip ${st.strip} · clean up to `, b);
+        if (st.count > 1) sum2.append(` × ${st.count}`);
+        sum2.append(' → ', names(st.parts || [st.part]));
       } else if (st.kind === 'cross') {
-        li.append(`strip ${st.strip} · crosscut `, b);
-        if (st.count > 1) li.append(` × ${st.count}`);
-        li.append(' → ', names([st.part]));
+        sum2.append(`strip ${st.strip} · ${saw}crosscut `, b, over);
+        if (st.count > 1) sum2.append(` × ${st.count}`);
+        sum2.append(' → ', names([st.part]));
       } else {
-        li.append(`strip ${st.strip} · trim to `, b);
-        if (st.count > 1) li.append(` × ${st.count}`);
-        li.append(' → ', names([st.part]));
+        sum2.append(`strip ${st.strip} · ${saw}trim to `, b);
+        if (st.count > 1) sum2.append(` × ${st.count}`);
+        sum2.append(' → ', names([st.part]));
       }
+      if (st.risky) sum2.append(' — finished edge');
+      stepDet.appendChild(sum2);
+      stepDet.appendChild(stepViz(st));
+      li.appendChild(stepDet);
       ol.appendChild(li);
-    }
+    });
     det.appendChild(ol);
 
     // What's on the bench afterwards: the blanks, and the keepable offcuts.
-    const y = sheetYield(sh, kerf);
+    const y = sheetYield(sh);
     const yieldEl = document.createElement('div');
     yieldEl.className = 'cutyield';
     const yrow = (label) => {
@@ -2465,6 +2767,70 @@ function sheetDiagram(sh, multi, key, kerf) {
   return wrap;
 }
 
+// Schematic for one cut-list step: the input workpiece with the cut line
+// drawn across it, the severed region tinted and labeled, the rest marked
+// as remainder or waste.
+function stepViz(st) {
+  const wrap = document.createElement('div');
+  wrap.className = 'stepviz';
+  const cap = document.createElement('div');
+  cap.className = 'vizcap';
+  cap.textContent = `from ${fmt(st.wpW * 1000)} × ${fmt(st.wpH * 1000)} mm`
+    + (st.count > 1 ? ` · first of ${st.count}` : '');
+  wrap.appendChild(cap);
+
+  const W = st.wpW * 1000;
+  const H = st.wpH * 1000;
+  const at = st.at * 1000;
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'stepsvg' });
+  const sw = Math.max(W, H) / 160;
+  svg.appendChild(svgEl('rect', {
+    x: 0, y: 0, width: W, height: H, class: 'stockrect', 'stroke-width': sw,
+  }));
+  const off = st.dir === 'h'
+    ? { x: 0, y: 0, w: W, h: at }
+    : { x: 0, y: 0, w: at, h: H };
+  const rest = st.dir === 'h'
+    ? { x: 0, y: at, w: W, h: H - at }
+    : { x: at, y: 0, w: W - at, h: H };
+  const color = st.part ? partColor(st.part) : null;
+  svg.appendChild(svgEl('rect', {
+    x: off.x, y: off.y, width: off.w, height: off.h,
+    ...(color ? { fill: color + '2e' } : { class: 'offneutral' }),
+  }));
+  const line = st.dir === 'h'
+    ? { x1: 0, y1: at, x2: W, y2: at }
+    : { x1: at, y1: 0, x2: at, y2: H };
+  svg.appendChild(svgEl('line', {
+    ...line,
+    class: 'cutline' + (st.risky ? ' risky' : st.tool === 'track' ? ' tk' : ''),
+    'stroke-width': sw * 1.6,
+    'stroke-dasharray': `${sw * 4} ${sw * 3}`,
+  }));
+  const offLabel = st.kind === 'break'
+    ? 'panel ' + st.panel
+    : st.kind === 'cross' || (st.kind === 'finish' && st.part) || st.kind === 'trim'
+      ? partName(st.part)
+      : 'strip ' + st.strip;
+  const restLabel = st.kind === 'break' || st.kind === 'rip' || st.kind === 'cross'
+    ? 'rest' : 'waste';
+  const putLabel = (region, text, cls) => {
+    const fs = Math.min(region.h * 0.5, (region.w * 0.9) / Math.max(3, text.length * 0.62));
+    if (fs < Math.max(W, H) / 26) return;
+    const t = svgEl('text', {
+      x: region.x + region.w / 2, y: region.y + region.h / 2,
+      class: cls, 'font-size': fs,
+      'text-anchor': 'middle', 'dominant-baseline': 'central',
+    });
+    t.textContent = text;
+    svg.appendChild(t);
+  };
+  putLabel(off, offLabel, 'cuttext');
+  putLabel(rest, restLabel, 'cuttext resttext');
+  wrap.appendChild(svg);
+  return wrap;
+}
+
 function renderCutsPanel() {
   const panel = document.getElementById('cutspanel');
   const p = currentProject();
@@ -2480,25 +2846,52 @@ function renderCutsPanel() {
   head.className = 'cutpanelhead';
   const h = document.createElement('h3');
   h.textContent = 'Parts to cut';
-  const kerfWrap = document.createElement('label');
-  kerfWrap.className = 'kerf';
-  kerfWrap.append('saw kerf ');
-  const kerfInp = document.createElement('input');
-  kerfInp.type = 'number';
-  kerfInp.step = '0.1';
-  kerfInp.min = '0';
-  kerfInp.max = '20';
-  kerfInp.value = String(d.kerf);
-  kerfInp.title = 'Blade width lost to every cut';
-  kerfInp.addEventListener('change', () => setKerf(kerfInp.value));
-  kerfInp.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Enter') kerfInp.blur();
-  });
-  kerfWrap.appendChild(kerfInp);
-  kerfWrap.append(' mm');
-  head.append(h, kerfWrap);
+  head.appendChild(h);
   panel.appendChild(head);
+
+  // Saw settings: table saw kerf and capacity; the tracksaw only matters
+  // once a capacity is set.
+  const sawIn = (value, placeholder, title, apply, wide) => {
+    const inp = document.createElement('input');
+    inp.type = 'number';
+    inp.step = '0.1';
+    inp.min = '0';
+    if (wide) inp.classList.add('wide');
+    inp.value = value === null ? '' : String(value);
+    if (placeholder) inp.placeholder = placeholder;
+    inp.title = title;
+    inp.addEventListener('change', () => apply(inp.value));
+    inp.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') inp.blur();
+    });
+    return inp;
+  };
+  const sawsRow = document.createElement('div');
+  sawsRow.className = 'sawsrow';
+  const tsGroup = document.createElement('label');
+  tsGroup.className = 'sawgroup';
+  const tsName = document.createElement('b');
+  tsName.textContent = 'table saw';
+  tsGroup.append(tsName, ' kerf ',
+    sawIn(d.kerf, '', 'Table saw blade width lost to every cut', setKerf),
+    ' · max ',
+    sawIn(d.cap.w, '—', 'Largest workpiece the table saw can handle — width (blank = no limit)', setCapW, true),
+    ' × ',
+    sawIn(d.cap.h, '—', 'Largest workpiece the table saw can handle — height (blank = no limit)', setCapH, true),
+    ' mm');
+  const twoSaw = d.cap.w !== null || d.cap.h !== null;
+  const tkGroup = document.createElement('label');
+  tkGroup.className = 'sawgroup' + (twoSaw ? '' : ' idle');
+  const tkName = document.createElement('b');
+  tkName.textContent = 'tracksaw';
+  tkGroup.append(tkName, ' kerf ',
+    sawIn(d.tkKerf, '', 'Tracksaw blade width lost to every cut', setTkKerf),
+    ' · margin ',
+    sawIn(d.tkMargin, '', 'Defensive oversize on tracksaw cuts, cleaned up on the table saw', setTkMargin),
+    ' mm');
+  sawsRow.append(tsGroup, tkGroup);
+  panel.appendChild(sawsRow);
 
   if (!d.parts.length) {
     const msg = document.createElement('p');
@@ -2543,7 +2936,7 @@ function renderCutsPanel() {
       for (const sh of g.plan.sheets) {
         const c = sh.stock.entry.comp;
         const key = g.label + '|' + sh.stock.line.id + '|' + sh.index;
-        panel.appendChild(sheetDiagram(sh, Math.round(c.n.si) > 1, key, d.kerf / 1000));
+        panel.appendChild(sheetDiagram(sh, Math.round(c.n.si) > 1, key));
       }
       if (g.plan.unplaced.length) {
         // Aggregate leftover pieces per part for one readable warning.
@@ -2646,7 +3039,7 @@ function migrateProject(p) {
       sheets,
       currentSheetId: sheets.some((s) => s.id === p.currentSheetId) ? p.currentSheetId : sheets[0].id,
       nextSheetId: Number(p.nextSheetId) || Math.max(...sheets.map((s) => s.id)) + 1,
-      ...(typeof p.kerf === 'number' && isFinite(p.kerf) ? { kerf: p.kerf } : {}),
+      ...sawSettings(p),
     };
   }
   if (!Array.isArray(p.lines) || !p.lines.length) return null;

@@ -682,7 +682,14 @@ main {
   color: var(--muted);
 }
 
-.kerf {
+.sawsrow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 26px;
+  margin: 2px 0 10px;
+}
+
+.sawgroup {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -691,8 +698,18 @@ main {
   white-space: nowrap;
 }
 
-.kerf input {
-  width: 56px;
+.sawgroup b {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sawgroup.idle { opacity: 0.55; }
+.sawgroup.idle:focus-within { opacity: 1; }
+
+.sawgroup input {
+  width: 52px;
   padding: 3px 4px 3px 8px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -704,7 +721,9 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
-.kerf input:focus {
+.sawgroup input.wide { width: 62px; }
+
+.sawgroup input:focus {
   outline: none;
   border-color: var(--accent);
 }
@@ -728,7 +747,8 @@ main {
   height: auto;
 }
 
-.cutsvg .stockrect {
+.cutsvg .stockrect,
+.stepsvg .stockrect {
   fill: var(--line-hover);
   stroke: var(--border);
 }
@@ -736,6 +756,11 @@ main {
 .cutsvg .sheetgrain {
   stroke: var(--muted);
   opacity: 0.18;
+}
+
+.cutsvg .breakline {
+  stroke: #e0913d;
+  opacity: 0.85;
 }
 
 .cutsvg .partgrain { opacity: 0.35; }
@@ -767,7 +792,8 @@ main {
   padding: 1px 9px;
 }
 
-.cutsvg .cuttext {
+.cutsvg .cuttext,
+.stepsvg .cuttext {
   fill: var(--text);
   opacity: 0.75;
   font-family: inherit;
@@ -814,6 +840,47 @@ main {
 }
 
 .cutlist .cpart { font-weight: 600; }
+
+.cutlist li.risky { color: var(--danger); }
+.cutlist li.risky b { color: var(--danger); }
+
+/* per-step schematic: the step line expands into a cut preview */
+.cutlist details.step summary {
+  list-style: none;
+  display: inline;
+  cursor: pointer;
+  font-weight: 400;
+  padding: 0;
+}
+
+.cutlist details.step summary::-webkit-details-marker { display: none; }
+.cutlist details.step summary:hover { text-decoration: underline dotted; color: var(--text); }
+.cutlist details.step[open] summary { color: var(--text); }
+
+.stepviz { margin: 6px 0 8px; }
+
+.vizcap {
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.stepsvg {
+  display: block;
+  width: 100%;
+  max-width: 300px;
+  max-height: 130px;
+  height: auto;
+}
+
+.stepsvg .offneutral { fill: color-mix(in srgb, var(--accent) 14%, transparent); }
+
+.stepsvg .cutline { stroke: var(--accent); }
+.stepsvg .cutline.tk { stroke: #e0913d; }
+.stepsvg .cutline.risky { stroke: var(--danger); }
+
+.stepsvg .resttext { opacity: 0.4; }
 
 .cutyield {
   margin: 8px 0 2px;

@@ -901,4 +901,75 @@ const rtg = t('JSON.stringify({ projects: [JSON.parse(JSON.stringify(currentProj
 t(`importProjectsFromData(${rtg})`);
 check('grain survives import', t('state.lines.find(l => l.kind === "comp").grain'), 'w');
 
+// 79. Two saws: over-capacity rips go to the tracksaw, oversize by the
+// margin, then a table saw clean-up; once the remainder fits, table saw
+const SAWS = 'const SAWS = { kerf: 0.003, tkKerf: 0.0022, margin: 0.01, capW: 2.5, capH: 0.63 };';
+check('two-saw cabinet: one tracksaw break, then all table saw',
+  t(`(() => { ${P} ${SAWS} const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], SAWS);
+      const steps = cutList(plan.sheets[0]);
+      return { cuts: plan.cuts, risky: plan.risky, trackOps: plan.trackOps,
+               seq: steps.map(s => (s.tool === 'track' ? 'tk-' : '') + s.kind + '@' + Math.round(s.at * 1000) + 'x' + s.count),
+               total: steps.reduce((a, s) => a + s.count, 0) }; })()`),
+  { cuts: 7, risky: 0, trackOps: 1,
+    seq: ['tk-break@609x1', 'rip@600x1', 'cross@900x2', 'cross@580x1', 'rip@580x1', 'cross@600x1'],
+    total: 7 });
+
+// 79b. Steps carry the workpiece they cut into, for the schematics
+check('steps track the shrinking workpiece',
+  t(`(() => { ${P} ${SAWS} const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], SAWS);
+      return cutList(plan.sheets[0]).map(s =>
+        s.dir + Math.round(s.wpW * 1000) + 'x' + Math.round(s.wpH * 1000)); })()`),
+  ['h2440x1220', 'h2440x609', 'v2440x600', 'v634x600', 'h2440x609', 'v2440x580']);
+
+// 79c. Half-sheet table saw: ONE tracksaw crosscut across the length
+// yields two panels, then everything runs on the table saw
+check('half-sheet capacity: one breakdown crosscut, rest table saw',
+  t(`(() => { ${P} const saws = { kerf: 0.003, tkKerf: 0.0022, margin: 0.01, capW: 1.25, capH: 1.25 };
+      const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], saws);
+      const steps = cutList(plan.sheets[0]);
+      return { trackOps: plan.trackOps, risky: plan.risky,
+               break1: steps[0].kind + '-' + steps[0].dir + '@' + Math.round(steps[0].at * 1000),
+               restAllTable: steps.slice(1).every(s => s.tool !== 'track') }; })()`),
+  { trackOps: 1, risky: 0, break1: 'break-v@1219', restAllTable: true });
+
+// 79d. Many thin strips: one breakdown beats repeated tracksaw rips
+check('strip stack: single break instead of two tracksaw rips',
+  t(`(() => { ${P} ${SAWS} const plan = planCuts([P(1.0,0.3,4)], [P(2.44,1.22,1)], SAWS);
+      const steps = cutList(plan.sheets[0]);
+      return { trackOps: plan.trackOps, risky: plan.risky,
+               kinds: steps.map(s => (s.tool === 'track' ? 'tk-' : '') + s.kind) }; })()`),
+  { trackOps: 1, risky: 0,
+    kinds: ['tk-break', 'rip', 'rip', 'cross', 'cross'] });
+
+// 80. Margin and the extra kerf come out of the sheet's leftovers
+check('two-saw yield: margin eats into the bottom remainder',
+  t(`(() => { ${P} ${SAWS} const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], SAWS);
+      const y = sheetYield(plan.sheets[0]);
+      return y.offcuts.map(o => [Math.round(o.w * 1000), Math.round(o.h * 1000)]); })()`),
+  [[1837, 580], [2440, 26], [51, 600], [2440, 6]]);
+
+// 81. A piece over capacity itself: tracksaw-finished edges, flagged risky
+check('over-capacity piece flags risky tracksaw edges',
+  t(`(() => { ${P} const saws = { kerf: 0.003, tkKerf: 0.0022, margin: 0.01, capW: 0.5, capH: 0.5 };
+      const plan = planCuts([P(0.9,0.6,1)], [P(2.44,1.22,1)], saws);
+      const steps = cutList(plan.sheets[0]);
+      return { risky: plan.risky, cuts: plan.cuts,
+               allTrack: steps.every(s => s.tool === 'track'),
+               allRisky: steps.every(s => s.risky === true) }; })()`),
+  { risky: 2, cuts: 2, allTrack: true, allRisky: true });
+
+// 82. Saw settings: setters, clearing capacity, survival through import
+t('setCapW("2500"); setCapH("630"); setTkKerf("2.2"); setTkMargin("8")');
+check('capacity and tracksaw settings set',
+  t('[currentProject().tsCapW, currentProject().tsCapH, currentProject().tkKerf, currentProject().tkMargin]'),
+  [2500, 630, 2.2, 8]);
+const rts = t('JSON.stringify({ projects: [JSON.parse(JSON.stringify(currentProject()))] })');
+t(`importProjectsFromData(${rts})`);
+check('saw settings survive import',
+  t('[currentProject().tsCapW, currentProject().tsCapH, currentProject().tkKerf, currentProject().tkMargin]'),
+  [2500, 630, 2.2, 8]);
+t('setCapW(""); setCapH("")');
+check('blank clears the capacity back to single-saw',
+  t('[currentProject().tsCapW, currentProject().tsCapH]'), [null, null]);
+
 process.exit(failures ? 1 : 0);
