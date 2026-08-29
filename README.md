@@ -48,3 +48,15 @@ longest valid prefix, so half-typed lines still show a live result.
 | `index.html` | Layout and keypad |
 | `style.css` | Theming (light/dark via `prefers-color-scheme`), responsive layout |
 | `app.js` | Token model, evaluator, editing/caret logic, rendering, persistence |
+| `test.js` | Headless test suite (see below) |
+
+## Tests
+
+```sh
+node test.js
+```
+
+No dependencies — the suite stubs the DOM, loads the real `app.js`, and drives the actual
+input handlers: arithmetic and precedence, live reference propagation, reordering with
+forward references, cycle rejection (and non-termination defense), labels, undo/redo
+coalescing, line deletion freezing/restoring references, and number formatting.
