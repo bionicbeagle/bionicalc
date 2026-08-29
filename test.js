@@ -10,6 +10,7 @@ function el() {
     style: { setProperty() {} },
     classList: { add() {}, remove() {} },
     appendChild(c) { return c; }, append() {},
+    setAttribute() {}, removeAttribute() {},
     querySelector() { return null; }, querySelectorAll() { return []; },
     addEventListener() {}, scrollIntoView() {},
   };
@@ -21,6 +22,7 @@ const sandbox = {
   document: {
     getElementById(id) { return (byId[id] ||= el()); },
     createElement() { return el(); },
+    createElementNS() { return el(); },
   },
   window: { addEventListener() {} },
   navigator: { platform: 'MacIntel' },
@@ -344,7 +346,7 @@ check('adopted document is project 1', t('state.lines.length'), p1Lines);
   };
   const sb = {
     console, setTimeout, clearTimeout,
-    document: { getElementById: () => el(), createElement: () => el() },
+    document: { getElementById: () => el(), createElement: () => el(), createElementNS: () => el() },
     window: { addEventListener() {} },
     navigator: { platform: 'MacIntel' },
     localStorage: {
@@ -359,8 +361,9 @@ check('adopted document is project 1', t('state.lines.length'), p1Lines);
   check('migration: one project', m('projects.length'), 1);
   check('migration: document intact', m('results.get(state.lines[0].id).v'), 7);
   check('migration: named', m('projects[0].name'), 'Project 1');
-  check('migration: wrapped into one sheet', m('projects[0].sheets.length'), 1);
-  check('migration: saved with sheets', m('JSON.parse(localStorage.getItem("bionicalc.v1")).projects[0].sheets.length'), 1);
+  check('migration: wrapped into one sheet', m('projects[0].sheets.filter(s => s.kind !== "cuts").length'), 1);
+  check('migration adds the pinned Cuts sheet', m('projects[0].sheets[projects[0].sheets.length - 1].kind'), 'cuts');
+  check('migration: saved with sheets', m('JSON.parse(localStorage.getItem("bionicalc.v1")).projects[0].sheets.filter(s => s.kind !== "cuts").length'), 1);
 }
 
 // 38b. The previous format (documents at the project level) migrates too
@@ -377,7 +380,7 @@ check('adopted document is project 1', t('state.lines.length'), p1Lines);
   };
   const sb = {
     console, setTimeout, clearTimeout,
-    document: { getElementById: () => el(), createElement: () => el() },
+    document: { getElementById: () => el(), createElement: () => el(), createElementNS: () => el() },
     window: { addEventListener() {} },
     navigator: { platform: 'MacIntel' },
     localStorage: {
@@ -389,7 +392,7 @@ check('adopted document is project 1', t('state.lines.length'), p1Lines);
   const ctx3 = vm.createContext(sb);
   vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), ctx3, { filename: 'app.js' });
   const m = (c) => vm.runInContext(c, ctx3);
-  check('sheetless project migrates', m('projects[0].sheets.length'), 1);
+  check('sheetless project migrates', m('projects[0].sheets.filter(s => s.kind !== "cuts").length'), 1);
   check('project name kept through migration', m('projects[0].name'), 'Bench');
   check('migrated sheet evaluates', m('results.get(state.lines[0].id).v'), 5);
 }
@@ -429,10 +432,10 @@ check('legacy import named', t('projects[projects.length - 1].name'), 'Imported'
 check('legacy import evaluates', res(0), 9);
 
 // 41. Sheets: separate pages within a project, each with its own undo
-check('project starts with one sheet', t('currentProject().sheets.length'), 1);
+check('project starts with one sheet', t('currentProject().sheets.filter(s => s.kind !== "cuts").length'), 1);
 const s1Undo = t('undoStack.length');
 t('newSheet()');
-check('sheet added and adopted', t('currentProject().sheets.length'), 2);
+check('sheet added and adopted', t('currentProject().sheets.filter(s => s.kind !== "cuts").length'), 2);
 check('fresh sheet is empty', res(0), null);
 check('fresh sheet has a fresh undo stack', t('undoStack.length'), 0);
 keys(['7']);
@@ -446,7 +449,7 @@ check('second sheet undo kept', t('undoStack.length'), 1);
 t('renameSheet(currentProject().currentSheetId, "  Drawers  ")');
 check('sheet renamed and trimmed', t('currentSheet().name'), 'Drawers');
 t('deleteSheet(currentProject().currentSheetId)');
-check('sheet deleted', t('currentProject().sheets.length'), 1);
+check('sheet deleted', t('currentProject().sheets.filter(s => s.kind !== "cuts").length'), 1);
 check('neighbor sheet adopted', res(0), 9);
 
 // 42. Importing the current format preserves sheets
@@ -460,8 +463,8 @@ const nf = {
   }],
 };
 check('sheeted import accepted', t(`importProjectsFromData(${JSON.stringify(nf)})`), 1);
-check('sheets preserved on import', t('currentProject().sheets.length'), 2);
-check('sheet names preserved', t('currentProject().sheets.map(s => s.name).join(",")'), 'Carcase,Drawers');
+check('sheets preserved on import', t('currentProject().sheets.filter(s => s.kind !== "cuts").length'), 2);
+check('sheet names preserved', t('currentProject().sheets.filter(s => s.kind !== "cuts").map(s => s.name).join(",")'), 'Carcase,Drawers');
 check('first imported sheet adopted', res(0), 3);
 t('switchSheet(currentProject().sheets[1].id)');
 check('second imported sheet evaluates', res(0), 4);
@@ -678,5 +681,224 @@ t('switchSheet(currentProject().sheets[1].id)');
 check('component lines survive import', t('state.lines.filter(l => l.kind === "comp").length'), compCount);
 check('first imported blank intact', t('fmtComp(results.get(state.lines.find(l => l.kind === "comp").id))'), '120 × 45 × 19 mm ×4');
 check('part ref still live after import', t('fmtComp(results.get(state.lines.filter(l => l.kind === "comp").pop().id))'), '60 × 5 × 5 mm ×1');
+
+// 60. Every project pins a Cuts sheet; regular sheets stay ahead of it
+t('newProject()');
+check('new project pins a Cuts sheet', t('currentProject().sheets[currentProject().sheets.length - 1].kind'), 'cuts');
+check('cuts sheet is named Cuts', t('currentProject().sheets.find(s => s.kind === "cuts").name'), 'Cuts');
+check('cuts sheet starts with a material line', t('currentProject().sheets.find(s => s.kind === "cuts").lines[0].kind'), 'comp');
+t('newSheet()');
+check('new sheets insert ahead of Cuts', t('currentProject().sheets[currentProject().sheets.length - 1].kind'), 'cuts');
+
+// 61. A blank on a calc sheet + materials on the Cuts page
+keys(['b', '1', '0', '0', 'm', 'm', 'enter', '5', '0', 'enter', '1', '0', 'enter', '2']);
+check('part blank on a calc sheet', lastVal(), '100,000 mm³');
+const cutsId = t('currentProject().sheets.find(s => s.kind === "cuts").id');
+t(`switchSheet(${cutsId})`);
+check('landing on a pristine material starts at width', t('state.part'), 'w');
+keys(['2', '4', '4', '0', 'm', 'm', 'enter', '1', '2', '2', '0', 'enter', '1', '8', 'enter']);
+check('material entered', t('fmtComp(results.get(state.activeId))'), '2,440 × 1,220 × 18 mm ×1');
+keys(['enter']);
+check('enter on Cuts begets another material', t('activeLine().kind'), 'comp');
+keys(['b']);
+check('materials cannot toggle back to calc lines', t('activeLine().kind'), 'comp');
+
+// 62. The Cuts sheet cannot be deleted
+const sheetsBefore = t('currentProject().sheets.length');
+t(`deleteSheet(${cutsId})`);
+check('cuts sheet delete refused', t('currentProject().sheets.length'), sheetsBefore);
+check('cuts sheet still there', t('currentProject().sheets.some(s => s.kind === "cuts")'), true);
+
+// 63. cutsData aggregates parts (other sheets) and stock (Cuts lines)
+check('cuts aggregation', t('(() => { const d = cutsData(currentProject()); return { parts: d.parts.length, pieces: d.pieces, partsMm3: Math.round(d.partsVol * 1e9), stockMm3: Math.round(d.stockVol * 1e9) }; })()'),
+  { parts: 1, pieces: 2, partsMm3: 100000, stockMm3: 53582400 });
+check('fmtVol picks liters from 1 l', t('fmtVol(0.0535824)'), '53.5824 l');
+check('fmtVol picks cm³ below', t('fmtVol(0.0001)'), '100 cm³');
+
+// 64. Export/import keeps exactly one Cuts sheet, materials intact
+const rtc = t('JSON.stringify({ projects: [JSON.parse(JSON.stringify(currentProject()))] })');
+check('cuts project re-imports', t(`importProjectsFromData(${rtc})`), 1);
+check('exactly one Cuts sheet after import', t('currentProject().sheets.filter(s => s.kind === "cuts").length'), 1);
+check('imported material intact', t('(() => { const c = currentProject().sheets.find(s => s.kind === "cuts"); return fmtComp(projResults.get(c.id + ":" + c.lines[0].id)); })()'),
+  '2,440 × 1,220 × 18 mm ×1');
+
+// 65. Imports without a Cuts sheet gain one
+check('legacy import gains a Cuts sheet', t('(() => { importProjectsFromData({ lines: [{ id: 1, tokens: [{ t: "n", v: "9" }] }] }); return currentProject().sheets.some(s => s.kind === "cuts"); })()'), true);
+
+// 66. Parts group by thickness and match against stock thicknesses
+t('newProject()');
+keys(['b',
+  '5', '0', '0', 'm', 'm', 'enter', '1', '0', '0', 'enter', '1', '9', 'enter', '2', 'enter',
+  '3', '0', '0', 'm', 'm', 'enter', '2', '0', '0', 'enter', '1', '9', 'enter', 'enter',
+  '4', '0', '0', 'm', 'm', 'enter', '1', '0', '0', 'enter', '1', '2', 'enter', '3', 'enter',
+  '1', '0', '0', 'm', 'm', 'enter', '1', '0', '0', 'enter', '1', '.', '9', 'c', 'm']);
+const cuts66 = t('currentProject().sheets.find(s => s.kind === "cuts").id');
+t(`switchSheet(${cuts66})`);
+keys(['2', '4', '4', '0', 'm', 'm', 'enter', '1', '2', '2', '0', 'enter', '1', '9', 'enter']);
+t('startLabelEdit(state.activeId); commitLabel(state.activeId, "ply19")');
+check('groups by thickness, thinnest first, 1.9cm folds into 19mm',
+  t('(() => { const d = cutsData(currentProject()); return d.groups.map(g => ({ label: g.label, n: g.parts.length, matched: g.matched, names: g.stockNames.join(",") })); })()'),
+  [
+    { label: '12 mm', n: 1, matched: false, names: '' },
+    { label: '19 mm', n: 3, matched: true, names: 'ply19' },
+  ]);
+check('group piece counts', t('cutsData(currentProject()).groups.map(g => g.pieces)'), [3, 4]);
+
+// 67. Editing a part's thickness regroups and rematches live
+t('switchSheet(currentProject().sheets[0].id)');
+t('state.activeId = state.lines.find(l => l.kind === "comp").id; state.part = "t"; state.sel = { idx: 0 }; update();');
+keys(['1', '2']);
+check('retyped 19 -> 12 moves the part between groups',
+  t('(() => { const d = cutsData(currentProject()); return d.groups.map(g => g.parts.length); })()'),
+  [2, 2]);
+t('undo()');
+check('undo restores the grouping', t('cutsData(currentProject()).groups.map(g => g.parts.length)'), [1, 3]);
+
+// 68. Kerf: defaults to 3 mm, settable, clamped, survives export/import
+check('kerf defaults to 3 mm', t('kerfOf(currentProject())'), 3);
+t('setKerf("2.8")');
+check('kerf set', t('currentProject().kerf'), 2.8);
+t('setKerf("999")');
+check('kerf clamped', t('currentProject().kerf'), 20);
+t('setKerf("2.8")');
+const rtk = t('JSON.stringify({ projects: [JSON.parse(JSON.stringify(currentProject()))] })');
+t(`importProjectsFromData(${rtk})`);
+check('kerf survives import', t('currentProject().kerf'), 2.8);
+
+// 69. planCuts: uniform strips per size, kerf between strips and neighbours
+const P = 'const P = (w,h,n) => ({ sheet: { colors: {} }, line: { id: 1 }, entry: { si: 1, dim: { L: 3 }, comp: { w: { si: w }, h: { si: h }, n: { si: n } } } });';
+check('planCuts groups same-size pieces into their own strip',
+  t(`(() => { ${P} const plan = planCuts([P(0.5,0.1,2), P(0.3,0.2,1)], [P(2.44,1.22,1)], 0.01);
+      const pl = plan.sheets[0].placed;
+      return { sheets: plan.sheets.length, placed: pl.length, unplaced: plan.unplaced.length,
+               first: pl[0].x, y2mm: Math.round(pl[1].y * 1000), x3mm: Math.round(pl[2].x * 1000),
+               cuts: plan.cuts }; })()`),
+  { sheets: 1, placed: 3, unplaced: 0, first: 0, y2mm: 210, x3mm: 510, cuts: 5 });
+
+// 69b. The cabinet case: sides 600×900 ×2 + tops 580×600 ×2 on one sheet —
+// identical parts pair up in uniform strips instead of mixing (6 cuts)
+check('cabinet example: pairs in uniform strips',
+  t(`(() => { ${P} const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], 0.003);
+      const pl = plan.sheets[0].placed;
+      return { cuts: plan.cuts, strips: [...new Set(pl.map(p => Math.round(p.y * 1000)))].length,
+               strip1: pl.filter(p => p.y === 0).map(p => Math.round(p.w * 1000)).join(','),
+               strip2: pl.filter(p => p.y > 0).map(p => Math.round(p.w * 1000)).join(',') }; })()`),
+  { cuts: 6, strips: 2, strip1: '900,900', strip2: '600,600' });
+
+// 69c. cutList: rips first, grouped crosscuts, steps sum to the cut count
+check('cabinet cut list: 2 rips then 2 grouped crosscut steps',
+  t(`(() => { ${P} const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], 0.003);
+      const steps = cutList(plan.sheets[0]);
+      return { seq: steps.map(s => s.kind + '@' + Math.round(s.at * 1000) + 'x' + s.count),
+               total: steps.reduce((a, s) => a + s.count, 0), cuts: plan.cuts }; })()`),
+  { seq: ['rip@600x1', 'rip@580x1', 'cross@900x2', 'cross@600x2'], total: 6, cuts: 6 });
+
+// 69d. cutList: trims listed after their strip's crosscuts
+check('cut list includes trims',
+  t(`(() => { ${P} const plan = planCuts([P(0.3,0.2,1), P(0.25,0.1,1)], [P(0.6,0.2,1)], 0);
+      const steps = cutList(plan.sheets[0]);
+      return { seq: steps.map(s => s.kind + '@' + Math.round(s.at * 1000)),
+               total: steps.reduce((a, s) => a + s.count, 0), cuts: plan.cuts }; })()`),
+  { seq: ['cross@300', 'cross@250', 'trim@100'], total: 3, cuts: 3 });
+
+// 69e. sheetYield: blanks plus offcuts (strip tails, trim cutoffs, remainder)
+check('cabinet yield: parts and three offcuts, kerf deducted',
+  t(`(() => { ${P} const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], 0.003);
+      const y = sheetYield(plan.sheets[0], 0.003);
+      return { parts: y.parts.map(p => [Math.round(p.w * 1000), Math.round(p.h * 1000), p.count]),
+               offcuts: y.offcuts.map(o => [Math.round(o.w * 1000), Math.round(o.h * 1000)]) }; })()`),
+  { parts: [[900, 600, 2], [600, 580, 2]],
+    offcuts: [[1234, 580], [634, 600], [2440, 34]] });
+check('trim-case yield includes the trim cutoff',
+  t(`(() => { ${P} const plan = planCuts([P(0.3,0.2,1), P(0.25,0.1,1)], [P(0.6,0.2,1)], 0);
+      const y = sheetYield(plan.sheets[0], 0);
+      return y.offcuts.map(o => [Math.round(o.w * 1000), Math.round(o.h * 1000)]); })()`),
+  [[250, 100], [50, 200]]);
+
+// 70. planCuts: overflow reports unplaced pieces; new shelves stack with kerf
+check('planCuts overflow',
+  t(`(() => { ${P} const plan = planCuts([P(0.5,0.1,2), P(0.3,0.2,1), P(0.1,0.1,1)], [P(0.6,0.3,1)], 0);
+      return { placed: plan.sheets[0].placed.length, unplaced: plan.unplaced.length,
+               shelf2y: Math.round(plan.sheets[0].placed[1].y * 1000) }; })()`),
+  { placed: 3, unplaced: 1, shelf2y: 200 });
+
+// 71. planCuts: rotation is tried when the natural orientation doesn't fit
+check('planCuts rotates to fit',
+  t(`(() => { ${P} const plan = planCuts([P(0.9,0.5,1), P(0.4,0.08,1)], [P(1.0,0.55,1)], 0);
+      const second = plan.sheets[0].placed[1];
+      return { placed: plan.sheets[0].placed.length, w2mm: Math.round(second.w * 1000), h2mm: Math.round(second.h * 1000) }; })()`),
+  { placed: 2, w2mm: 80, h2mm: 400 });
+
+// 72. planCuts: second stock sheet opens when the first is full, in line order
+check('planCuts opens more stock',
+  t(`(() => { ${P} const plan = planCuts([P(0.5,0.5,3)], [P(0.6,0.6,2), P(1.2,0.6,1)], 0.01);
+      return plan.sheets.map(s => [Math.round(s.W * 1000), s.placed.length]); })()`),
+  [[600, 1], [600, 1], [1200, 1]]);
+
+// 73. Matched groups carry a plan; unmatched don't (via the live document)
+check('matched group gets a cut plan',
+  t('(() => { const d = cutsData(currentProject()); const g19 = d.groups.find(g => g.label === "19 mm"); const g12 = d.groups.find(g => g.label === "12 mm"); return { planned: g19.plan.sheets.length, allPlaced: g19.plan.unplaced.length === 0, unmatchedHasNoPlan: g12.plan === undefined }; })()'),
+  { planned: 1, allPlaced: true, unmatchedHasNoPlan: true });
+
+// 74. Grain chip cycles w -> h -> don't care, undoably
+t('state.activeId = state.lines.find(l => l.kind === "comp").id;');
+const grainLine = t('state.activeId');
+t(`cycleGrain(${grainLine})`);
+check('grain cycles to width', t(`state.lines.find(l => l.id === ${grainLine}).grain`), 'w');
+t(`cycleGrain(${grainLine})`);
+check('grain cycles to height', t(`state.lines.find(l => l.id === ${grainLine}).grain`), 'h');
+t(`cycleGrain(${grainLine})`);
+check('grain cycles back to unset', t(`state.lines.find(l => l.id === ${grainLine}).grain`), undefined);
+t('undo()');
+check('grain change is undoable', t(`state.lines.find(l => l.id === ${grainLine}).grain`), 'h');
+t(`cycleGrain(${grainLine})`); // back to unset for later tests
+
+// 75. planCuts honors grain: aligned grain forces rotation
+const PG = 'const P = (w,h,n,g) => ({ sheet: { colors: {} }, line: { id: 1, ...(g ? { grain: g } : {}) }, entry: { si: 1, dim: { L: 3 }, comp: { w: { si: w }, h: { si: h }, n: { si: n } } } });';
+check('cross-grain piece is rotated into alignment',
+  t(`(() => { ${PG} const plan = planCuts([P(0.5,0.2,1,'h')], [P(1,1,1,'w')], 0);
+      const pl = plan.sheets[0].placed[0];
+      return { w2mm: Math.round(pl.w * 1000), h2mm: Math.round(pl.h * 1000), grain: pl.grain }; })()`),
+  { w2mm: 200, h2mm: 500, grain: 'x' });
+
+// 76. Grain can make a piece unplaceable that would otherwise fit
+check('grain conflict leaves the piece unplaced',
+  t(`(() => { ${PG} const plan = planCuts([P(0.5,0.2,1,'h')], [P(1.0,0.3,1,'w')], 0);
+      return { placed: plan.sheets.length, unplaced: plan.unplaced.length }; })()`),
+  { placed: 0, unplaced: 1 });
+check('same piece places once either side stops caring',
+  t(`(() => { ${PG} const plan = planCuts([P(0.5,0.2,1,'h')], [P(1.0,0.3,1)], 0);
+      const pl = plan.sheets[0].placed[0];
+      return { w2mm: Math.round(pl.w * 1000), unplaced: plan.unplaced.length }; })()`),
+  { w2mm: 500, unplaced: 0 });
+
+// 77. Normalization keeps the physical grain axis: portrait part, grain
+// along its narrow width, aligns with stock grain along the height
+check('grain survives landscape normalization',
+  t(`(() => { ${PG} const plan = planCuts([P(0.2,0.5,1,'w')], [P(1.2,1.0,1,'h')], 0);
+      const pl = plan.sheets[0].placed[0];
+      return { w2mm: Math.round(pl.w * 1000), grain: pl.grain }; })()`),
+  { w2mm: 500, grain: 'y' });
+
+// 77b. A grain-set part never rotates on stock without grain
+check('grain-set part keeps its authored orientation',
+  t(`(() => { ${PG} const plan = planCuts([P(0.2,0.5,1,'w')], [P(1.0,0.6,1)], 0);
+      const pl = plan.sheets[0].placed[0];
+      return { w2mm: Math.round(pl.w * 1000), h2mm: Math.round(pl.h * 1000) }; })()`),
+  { w2mm: 200, h2mm: 500 });
+check('authored orientation is refused room rather than rotated',
+  t(`(() => { ${PG} const plan = planCuts([P(0.2,0.5,1,'w')], [P(1.0,0.3,1)], 0);
+      return { sheets: plan.sheets.length, unplaced: plan.unplaced.length }; })()`),
+  { sheets: 0, unplaced: 1 });
+check('same piece without grain lies down and fits',
+  t(`(() => { ${PG} const plan = planCuts([P(0.2,0.5,1)], [P(1.0,0.3,1)], 0);
+      return { placed: plan.sheets[0].placed.length, w2mm: Math.round(plan.sheets[0].placed[0].w * 1000) }; })()`),
+  { placed: 1, w2mm: 500 });
+
+// 78. Grain survives export/import
+t(`cycleGrain(${grainLine})`); // set to 'w'
+const rtg = t('JSON.stringify({ projects: [JSON.parse(JSON.stringify(currentProject()))] })');
+t(`importProjectsFromData(${rtg})`);
+check('grain survives import', t('state.lines.find(l => l.kind === "comp").grain'), 'w');
 
 process.exit(failures ? 1 : 0);

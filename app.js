@@ -144,10 +144,11 @@ function curToks() {
   return l.kind === 'comp' ? l.parts[state.part] : l.tokens;
 }
 
-// "End of line" for either kind: a component's caret lands after its qty.
+// "End of line" for either kind: a component's caret lands after its qty —
+// except an untouched component, where typing should start at its width.
 function caretToEnd() {
   const l = activeLine();
-  if (l && l.kind === 'comp') state.part = 'n';
+  if (l && l.kind === 'comp') state.part = compIsPristine(l) ? 'w' : 'n';
   state.caret = curToks().length;
 }
 
@@ -679,11 +680,14 @@ function backspace() {
 }
 
 // Enter at the end of a line: a component begets another component (filling
-// in a parts list), a calc line begets a calc line.
+// in a parts list), a calc line begets a calc line. On the Cuts page every
+// line is a material, so new lines are always components there.
 function newLine() {
   const line = activeLine();
   if (line.kind === 'comp' ? compIsPristine(line) : line.tokens.length === 0) return;
-  const nl = line.kind === 'comp' ? freshComp() : { id: state.nextId++, tokens: [] };
+  const nl = line.kind === 'comp' || onCutsSheet()
+    ? freshComp()
+    : { id: state.nextId++, tokens: [] };
   state.lines.splice(activeIndex() + 1, 0, nl);
   state.activeId = nl.id;
   state.part = 'w';
@@ -716,6 +720,7 @@ function blankToggle() {
   const line = activeLine();
   if (line.kind === 'comp') {
     if (compIsPristine(line)) {
+      if (onCutsSheet()) return; // the Cuts page holds materials only
       delete line.kind;
       delete line.parts;
       state.caret = 0;
@@ -741,6 +746,21 @@ function insertCompAfter() {
   state.part = 'w';
   state.caret = 0;
   state.sel = null;
+}
+
+// Grain direction on a component or material: along the width ('w'), along
+// the height ('h'), or unset — don't care. In cut layouts a grain-set part
+// rotates only to align with grain-set stock; otherwise it keeps its
+// authored orientation, and only don't-care parts rotate freely.
+function cycleGrain(id) {
+  const line = state.lines.find((l) => l.id === id);
+  if (!line || line.kind !== 'comp') return;
+  const before = snapshot();
+  if (line.grain === 'w') line.grain = 'h';
+  else if (line.grain === 'h') delete line.grain;
+  else line.grain = 'w';
+  commitHistory(before, null);
+  update();
 }
 
 function ensureColor(id) {
@@ -861,7 +881,9 @@ function removeLine(id) {
   }
   state.lines.splice(idx, 1);
   delete state.colors[id];
-  if (!state.lines.length) state.lines.push({ id: state.nextId++, tokens: [] });
+  if (!state.lines.length) {
+    state.lines.push(onCutsSheet() ? freshComp() : { id: state.nextId++, tokens: [] });
+  }
   if (state.activeId === id) {
     state.activeId = state.lines[Math.max(0, idx - 1)].id;
     caretToEnd();
@@ -1029,6 +1051,394 @@ const currentSheet = () => {
 };
 const historyKey = (pid, sid) => pid + ':' + sid;
 
+/*
+ * The Cuts page: every project carries one pinned sheet with kind:'cuts' —
+ * the cut-planning page. Its lines are MATERIAL entries (stock on hand),
+ * which reuse the component-blank shape (width × height × thickness × qty),
+ * and the page lists every blank on the project's other sheets as parts to
+ * cut. Dividing the stock into those parts is the planned next step.
+ */
+const onCutsSheet = () => {
+  const s = currentSheet();
+  return !!s && s.kind === 'cuts';
+};
+
+function ensureCutsSheet(p) {
+  if (p.sheets.some((s) => s.kind === 'cuts')) return;
+  const id = p.nextSheetId++;
+  p.sheets.push({
+    id,
+    name: 'Cuts',
+    kind: 'cuts',
+    lines: [{ id: 1, kind: 'comp', tokens: [], parts: { w: [], h: [], t: [], n: [{ t: 'n', v: '1' }] } }],
+    activeId: 1,
+    colors: {},
+    nextId: 2,
+    nextColor: 0,
+  });
+}
+
+// Live aggregation for the Cuts page: every blank on the project's other
+// sheets (the parts), grouped by thickness and matched against the stock on
+// the Cuts sheet, plus volume totals. Volumes only sum entries that are
+// actual volumes (L³) — unitless blanks are listed but can't contribute to
+// material math.
+function cutsData(p) {
+  const cuts = p.sheets.find((s) => s.kind === 'cuts');
+  const parts = [];
+  let partsVol = 0;
+  let pieces = 0;
+  for (const s of p.sheets) {
+    if (s.kind === 'cuts') continue;
+    for (const l of s.lines) {
+      if (l.kind !== 'comp') continue;
+      const entry = projResults.get(s.id + ':' + l.id);
+      parts.push({ sheet: s, line: l, entry });
+      if (hasVal(entry) && sameDim(entry.dim, { L: 3 })) {
+        partsVol += entry.si;
+        pieces += entry.comp && entry.comp.n ? entry.comp.n.si : 0;
+      }
+    }
+  }
+  const stock = [];
+  let stockVol = 0;
+  for (const l of (cuts ? cuts.lines : [])) {
+    if (l.kind !== 'comp') continue;
+    const entry = projResults.get(cuts.id + ':' + l.id);
+    if (hasVal(entry) && sameDim(entry.dim, { L: 3 })) {
+      stock.push({ line: l, entry });
+      stockVol += entry.si;
+    }
+  }
+
+  // Thickness buckets: 0.1 µm rounding kills float noise (so 1.9cm groups
+  // with 19mm and 54mm/3 with 18mm); unitless thicknesses get their own
+  // namespace so 19 never matches 19mm.
+  const tKeyOf = (entry) => {
+    const t = entry && entry.comp && entry.comp.t;
+    return t ? (dimless(t.dim) ? 'u' : 'L') + Math.round(t.si * 1e7) : null;
+  };
+  const stockByKey = new Map(); // thickness key -> the materials carrying it
+  for (const s of stock) {
+    const k = tKeyOf(s.entry);
+    if (k === null) continue;
+    if (!stockByKey.has(k)) stockByKey.set(k, []);
+    stockByKey.get(k).push(s);
+  }
+  const byKey = new Map();
+  for (const part of parts) {
+    const k = tKeyOf(part.entry);
+    let g = byKey.get(k);
+    if (!g) {
+      const t = k === null ? null : part.entry.comp.t;
+      const matching = (k !== null && stockByKey.get(k)) || [];
+      g = {
+        t,
+        label: t ? fmtVal(t) : 'thickness not set',
+        parts: [],
+        pieces: 0,
+        matched: matching.length > 0,
+        stock: matching,
+        stockNames: [...new Set(matching.map((s) => s.line.label || 'stock'))],
+      };
+      byKey.set(k, g);
+    }
+    g.parts.push(part);
+    if (hasVal(part.entry) && part.entry.comp.n) g.pieces += part.entry.comp.n.si;
+  }
+  // Thinnest first; unitless thicknesses after real ones, unresolved last.
+  const groups = [...byKey.entries()]
+    .sort(([ka, ga], [kb, gb]) => {
+      if (ka === null || kb === null) return ka === null ? 1 : -1;
+      if ((ka[0] === 'u') !== (kb[0] === 'u')) return ka[0] === 'u' ? 1 : -1;
+      return ga.t.si - gb.t.si;
+    })
+    .map(([, g]) => g);
+
+  const kerf = kerfOf(p);
+  for (const g of groups) {
+    if (g.matched) g.plan = planCuts(g.parts, g.stock, kerf / 1000);
+  }
+
+  return { parts, groups, stock, partsVol, stockVol, pieces, kerf };
+}
+
+// Volumes on the Cuts page: liters from 1 l up, cm³ below.
+function fmtVol(si) {
+  return si >= 1e-3 ? fmt(si / 1e-3) + ' l' : fmt(si / 1e-6) + ' cm³';
+}
+
+// Saw kerf — the blade width lost to every cut — in mm, per project.
+const kerfOf = (p) =>
+  typeof p.kerf === 'number' && isFinite(p.kerf) ? p.kerf : 3;
+
+function setKerf(v) {
+  const p = currentProject();
+  if (!p) return;
+  const n = parseFloat(v);
+  p.kerf = isFinite(n) ? Math.max(0, Math.min(20, n)) : 3;
+  update();
+}
+
+/*
+ * Cut planning for one thickness group: fill the matching stock with the
+ * group's pieces, OPTIMIZING FOR THE SAW. The layout is a shelf-based
+ * guillotine (rip strips across the sheet, then crosscut the pieces, kerf
+ * consumed between neighbours), but the planner searches several candidate
+ * layouts — each part type facing either way, strips that only accept
+ * same-height pieces vs. strips that mix — and keeps the winner by: fewest
+ * unplaced pieces, then fewest stock sheets, then fewest estimated saw
+ * cuts, then shortest packed height. That is what puts identical parts
+ * next to each other in uniform strips instead of scattering them.
+ *
+ * Grain rules: a part that doesn't care may face either way; a grain-set
+ * part rotates only to align with grain-set stock, and keeps its authored
+ * orientation on stock without grain. Stock is used in Cuts-page line
+ * order (drag lines to change priority), each line expanded by its
+ * quantity. Everything is SI; pieces that fit nowhere come back in
+ * `unplaced`.
+ */
+function planCuts(parts, stock, kerf) {
+  const EPS = 1e-9;
+  const TOL = 1e-6;
+  const axis = (g) => (g === 'w' ? 'x' : g === 'h' ? 'y' : null);
+
+  // One type per part line; its pieces are identical.
+  const types = [];
+  for (const part of parts) {
+    if (!hasVal(part.entry)) continue;
+    const c = part.entry.comp;
+    const n = Math.min(500, Math.max(0, Math.round(c.n.si)));
+    if (!n) continue;
+    types.push({ part, n, aw: c.w.si, ah: c.h.si, g: axis(part.line.grain) });
+  }
+  const instances = [];
+  for (const s of stock) {
+    const c = s.entry.comp;
+    const n = Math.min(100, Math.max(0, Math.round(c.n.si)));
+    for (let i = 0; i < n; i++) {
+      instances.push({ stock: s, index: i, W: c.w.si, H: c.h.si, grain: axis(s.line.grain) });
+    }
+  }
+
+  // Legal orientations on a given sheet: 'A' keeps the authored w×h, 'R'
+  // swaps them.
+  const orients = (ty, sg) => {
+    if (ty.g === null) return ty.aw === ty.ah ? ['A'] : ['A', 'R'];
+    if (sg === null) return ['A'];
+    return ty.g === sg ? ['A'] : ['R'];
+  };
+  const dims = (ty, o) => (o === 'A' ? { w: ty.aw, h: ty.ah } : { w: ty.ah, h: ty.aw });
+
+  function layout(pref, strict) {
+    const pieces = [];
+    for (const ty of types) {
+      const d = dims(ty, pref.get(ty) || 'A');
+      for (let i = 0; i < ty.n; i++) pieces.push({ ty, o: pref.get(ty) || 'A', pw: d.w, ph: d.h });
+    }
+    pieces.sort((a, b) => b.ph - a.ph || b.pw - a.pw);
+
+    const sheets = [];
+    const avail = instances.slice();
+    const unplaced = [];
+
+    const tryPlace = (S, pw, ph) => {
+      for (const shelf of S.shelves) {
+        const fitH = strict ? Math.abs(shelf.h - ph) < TOL : ph <= shelf.h + EPS;
+        const x = shelf.xUsed + (shelf.xUsed > 0 ? kerf : 0);
+        if (fitH && x + pw <= S.W + EPS) return { shelf, x, y: shelf.y };
+      }
+      const y = S.yUsed + (S.yUsed > 0 ? kerf : 0);
+      if (y + ph <= S.H + EPS && pw <= S.W + EPS) return { shelf: null, x: 0, y };
+      return null;
+    };
+    const attempt = (S, piece) => {
+      const legal = orients(piece.ty, S.grain);
+      const order = legal.length > 1 && legal.includes(piece.o)
+        ? [piece.o, legal.find((o) => o !== piece.o)]
+        : legal;
+      for (const o of order) {
+        const d = dims(piece.ty, o);
+        const pl = tryPlace(S, d.w, d.h);
+        if (pl) return { ...pl, w: d.w, h: d.h, o };
+      }
+      return null;
+    };
+    const commit = (S, pl, piece) => {
+      if (!pl.shelf) {
+        pl.shelf = { y: pl.y, h: pl.h, xUsed: 0 };
+        S.shelves.push(pl.shelf);
+        S.yUsed = pl.y + pl.h;
+      }
+      pl.shelf.xUsed = pl.x + pl.w;
+      const g = piece.ty.g;
+      const grain = g === null ? null : pl.o === 'A' ? g : g === 'x' ? 'y' : 'x';
+      S.placed.push({ part: piece.ty.part, x: pl.x, y: pl.y, w: pl.w, h: pl.h, grain });
+      S.area += pl.w * pl.h;
+    };
+
+    for (const piece of pieces) {
+      let pl = null;
+      let target = null;
+      for (const S of sheets) {
+        pl = attempt(S, piece);
+        if (pl) { target = S; break; }
+      }
+      if (!pl) {
+        // Open the first remaining sheet with room in a legal orientation.
+        const i = avail.findIndex((inst) => orients(piece.ty, inst.grain).some((o) => {
+          const d = dims(piece.ty, o);
+          return d.w <= inst.W + EPS && d.h <= inst.H + EPS;
+        }));
+        if (i >= 0) {
+          const [inst] = avail.splice(i, 1);
+          target = { ...inst, shelves: [], yUsed: 0, placed: [], area: 0 };
+          sheets.push(target);
+          pl = attempt(target, piece);
+        }
+      }
+      if (pl) commit(target, pl, piece);
+      else unplaced.push({ part: piece.ty.part });
+    }
+    return { sheets, unplaced };
+  }
+
+  // Saw cuts a sheet's layout needs: one rip per strip not ending at the
+  // sheet edge, one crosscut per piece not flush with the right edge, one
+  // trim per piece shorter than its strip.
+  const countCuts = (S) => {
+    let cuts = 0;
+    for (const shelf of S.shelves) {
+      if (shelf.y + shelf.h < S.H - TOL) cuts++;
+      for (const pl of S.placed) {
+        if (Math.abs(pl.y - shelf.y) > TOL) continue;
+        if (pl.x + pl.w < S.W - TOL) cuts++;
+        if (pl.h < shelf.h - TOL) cuts++;
+      }
+    }
+    return cuts;
+  };
+
+  // Candidate orientations: exhaustive over the free (grain-less,
+  // non-square) types when few, otherwise a greedy set of single flips.
+  const free = types.filter((ty) => ty.g === null && ty.aw !== ty.ah);
+  const assignments = [];
+  if (free.length <= 6) {
+    for (let mask = 0; mask < (1 << free.length); mask++) {
+      const m = new Map();
+      free.forEach((ty, i) => m.set(ty, (mask >> i) & 1 ? 'R' : 'A'));
+      assignments.push(m);
+    }
+  } else {
+    assignments.push(new Map(free.map((ty) => [ty, 'A'])));
+    assignments.push(new Map(free.map((ty) => [ty, 'R'])));
+    for (const ty of free) {
+      const m = new Map(free.map((t2) => [t2, 'A']));
+      m.set(ty, 'R');
+      assignments.push(m);
+    }
+  }
+
+  const cmp = (a, b) => {
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return 0;
+  };
+  let best = null;
+  let bestKey = null;
+  for (const strict of [true, false]) {
+    for (const m of assignments) {
+      const plan = layout(m, strict);
+      for (const S of plan.sheets) S.cuts = countCuts(S);
+      const key = [
+        plan.unplaced.length,
+        plan.sheets.length,
+        plan.sheets.reduce((a, S) => a + S.cuts, 0),
+        plan.sheets.reduce((a, S) => a + S.yUsed, 0),
+      ];
+      if (!best || cmp(key, bestKey) < 0) {
+        best = plan;
+        bestKey = key;
+      }
+    }
+  }
+  best.cuts = bestKey[2];
+  return best;
+}
+
+// The ordered saw work for one planned sheet: rip the strips off top to
+// bottom, then crosscut each strip into its pieces, then trim any piece
+// shorter than its strip. Every fence setting is a finished dimension —
+// the kerf falls on the waste side of the blade. Runs of identical cuts
+// group into one step with a count. Step counts sum to the sheet's cuts.
+function cutList(S) {
+  const TOL = 1e-6;
+  const steps = [];
+  const shelves = S.shelves.slice().sort((a, b) => a.y - b.y);
+  const inShelf = (shelf) =>
+    S.placed.filter((pl) => Math.abs(pl.y - shelf.y) < TOL).sort((a, b) => a.x - b.x);
+  shelves.forEach((shelf, i) => {
+    if (shelf.y + shelf.h < S.H - TOL) {
+      steps.push({
+        kind: 'rip', strip: i + 1, at: shelf.h, count: 1,
+        parts: [...new Set(inShelf(shelf).map((pl) => pl.part))],
+      });
+    }
+  });
+  shelves.forEach((shelf, i) => {
+    let run = null;
+    for (const pl of inShelf(shelf)) {
+      if (pl.x + pl.w >= S.W - TOL) continue; // flush with the edge — no cut
+      if (run && Math.abs(run.at - pl.w) < TOL && run.part === pl.part) run.count++;
+      else {
+        run = { kind: 'cross', strip: i + 1, at: pl.w, count: 1, part: pl.part };
+        steps.push(run);
+      }
+    }
+    for (const pl of inShelf(shelf)) {
+      if (pl.h >= shelf.h - TOL) continue;
+      const ex = steps.find((s) => s.kind === 'trim' && s.strip === i + 1
+        && Math.abs(s.at - pl.h) < TOL && s.part === pl.part);
+      if (ex) ex.count++;
+      else steps.push({ kind: 'trim', strip: i + 1, at: pl.h, count: 1, part: pl.part });
+    }
+  });
+  return steps;
+}
+
+// What a planned sheet yields once its cut list is executed: the finished
+// blanks, and the offcuts — one tail per strip beyond its last crosscut,
+// one cutoff per trimmed piece, and the remainder below the last strip.
+// The kerf around each cut is gone; slivers under 1 mm aren't listed.
+function sheetYield(S, kerf) {
+  const TOL = 1e-6;
+  const MIN = 1e-3 - TOL;
+  const parts = [];
+  for (const pl of S.placed) {
+    const ex = parts.find((p) => p.part === pl.part
+      && Math.abs(p.w - pl.w) < TOL && Math.abs(p.h - pl.h) < TOL);
+    if (ex) ex.count++;
+    else parts.push({ part: pl.part, w: pl.w, h: pl.h, count: 1 });
+  }
+  const offcuts = [];
+  const add = (w, h) => {
+    if (w < MIN || h < MIN) return;
+    const ex = offcuts.find((o) => Math.abs(o.w - w) < TOL && Math.abs(o.h - h) < TOL);
+    if (ex) ex.count++;
+    else offcuts.push({ w, h, count: 1 });
+  };
+  for (const shelf of S.shelves) {
+    add(S.W - shelf.xUsed - kerf, shelf.h); // strip tail
+    for (const pl of S.placed) {
+      if (Math.abs(pl.y - shelf.y) < TOL && pl.h < shelf.h - TOL) {
+        add(pl.w, shelf.h - pl.h - kerf);   // trim cutoff
+      }
+    }
+  }
+  add(S.W, S.H - S.yUsed - kerf);           // below the last strip
+  offcuts.sort((a, b) => b.w * b.h - a.w * a.h);
+  return { parts, offcuts };
+}
+
 function freshSheet(p) {
   const id = p.nextSheetId++;
   return {
@@ -1048,6 +1458,7 @@ function freshProject() {
   const s = freshSheet(p);
   p.sheets.push(s);
   p.currentSheetId = s.id;
+  ensureCutsSheet(p);
   return p;
 }
 
@@ -1157,7 +1568,9 @@ function newSheet() {
   commitLabelEditFromDom();
   syncCurrentSheet();
   const s = freshSheet(p);
-  p.sheets.push(s);
+  // Regular sheets stay ahead of the pinned Cuts sheet.
+  const ci = p.sheets.findIndex((x) => x.kind === 'cuts');
+  p.sheets.splice(ci < 0 ? p.sheets.length : ci, 0, s);
   adoptSheet(p, s.id);
   update();
 }
@@ -1166,7 +1579,7 @@ function deleteSheet(sheetId) {
   const p = currentProject();
   if (!p) return;
   const idx = p.sheets.findIndex((s) => s.id === sheetId);
-  if (idx < 0) return;
+  if (idx < 0 || p.sheets[idx].kind === 'cuts') return;
   // Freeze every cross-sheet reference into the doomed sheet.
   syncCurrentSheet();
   for (const s of p.sheets) {
@@ -1253,6 +1666,7 @@ function importProjectsFromData(d) {
           ? l.tokens.filter(okTok).map((t) => ({ ...t }))
           : [],
         ...(l.kind === 'comp' ? { kind: 'comp', parts: sanitizeParts(l.parts) } : {}),
+        ...(l.kind === 'comp' && (l.grain === 'w' || l.grain === 'h') ? { grain: l.grain } : {}),
         ...(l.label ? { label: String(l.label).slice(0, 24) } : {}),
       }));
     if (!lines.length) return null;
@@ -1287,7 +1701,12 @@ function importProjectsFromData(d) {
       if (!doc) continue;
       const sid = sheetId++;
       if (s && s.id !== undefined) sheetIdMap.set(s.id, sid);
-      sheets.push({ id: sid, name: cleanName(s && s.name, 'Sheet ' + sid), ...doc });
+      sheets.push({
+        id: sid,
+        name: cleanName(s && s.name, 'Sheet ' + sid),
+        ...(s && s.kind === 'cuts' ? { kind: 'cuts' } : {}),
+        ...doc,
+      });
     }
     if (!sheets.length) continue;
     // Re-point cross-sheet references at the renumbered sheet ids; a ref into
@@ -1309,9 +1728,13 @@ function importProjectsFromData(d) {
       sheets,
       currentSheetId: sheets[0].id,
       nextSheetId: sheetId,
+      ...(typeof p.kerf === 'number' && isFinite(p.kerf)
+        ? { kerf: Math.max(0, Math.min(20, p.kerf)) }
+        : {}),
     });
   }
   if (!added.length) return 0;
+  for (const ap of added) ensureCutsSheet(ap);
   commitLabelEditFromDom();
   syncCurrentSheet();
   projects.push(...added);
@@ -1504,6 +1927,14 @@ function render() {
           toks.appendChild(f);
         }
       });
+      const gb = document.createElement('button');
+      gb.className = 'grainbtn' + (line.grain ? ' set' : '');
+      gb.textContent = line.grain === 'w' ? '↔' : line.grain === 'h' ? '↕' : 'grain';
+      gb.title = 'Grain '
+        + (line.grain === 'w' ? 'along the width'
+          : line.grain === 'h' ? 'along the height' : "— don't care")
+        + ' · tap to change';
+      toks.appendChild(gb);
     } else {
       toks.className = 'tokens';
       line.tokens.forEach((tok, i) => {
@@ -1633,6 +2064,7 @@ function render() {
   projectBar.render();
   sheetBar.render();
   renderSummary();
+  renderCutsPanel();
 
   if (labelEditId !== null) {
     const inp = linesEl.querySelector('.label-input');
@@ -1715,6 +2147,20 @@ function makeTabBar(container, cfg) {
     add.title = cfg.addTitle;
     container.appendChild(add);
 
+    // Pinned tabs (the Cuts page) sit after +, can't be renamed or deleted.
+    for (const it of (cfg.pinned ? cfg.pinned() : [])) {
+      const active = it.id === cfg.currentId();
+      const tab = document.createElement('div');
+      tab.className = 'ptab pin' + (active ? ' active' : '');
+      tab.dataset.tid = it.id;
+      tab.title = it.title || it.name;
+      const nm = document.createElement('span');
+      nm.className = 'pname';
+      nm.textContent = it.name;
+      tab.appendChild(nm);
+      container.appendChild(tab);
+    }
+
     if (renameId !== null) {
       const inp = container.querySelector('.ptab input');
       if (inp) {
@@ -1746,6 +2192,10 @@ function makeTabBar(container, cfg) {
     const tab = e.target.closest('.ptab');
     if (!tab) return;
     const tid = Number(tab.dataset.tid);
+    if (tab.classList.contains('pin')) {
+      if (tid !== cfg.currentId()) cfg.switchTo(tid);
+      return;
+    }
     if (e.target.closest('.pdel')) {
       if (delArm === tid) {
         clearTimeout(delTimer);
@@ -1789,7 +2239,7 @@ const projectBar = makeTabBar(document.getElementById('projtabs'), {
 });
 
 const sheetBar = makeTabBar(document.getElementById('sheettabs'), {
-  items: () => (currentProject() ? currentProject().sheets : []),
+  items: () => (currentProject() ? currentProject().sheets.filter((s) => s.kind !== 'cuts') : []),
   currentId: () => (currentProject() ? currentProject().currentSheetId : null),
   switchTo: switchSheet,
   create: newSheet,
@@ -1797,6 +2247,11 @@ const sheetBar = makeTabBar(document.getElementById('sheettabs'), {
   rename: renameSheet,
   addTitle: 'New sheet',
   deleteTitle: 'Delete this sheet',
+  pinned: () => {
+    const p = currentProject();
+    const c = p && p.sheets.find((s) => s.kind === 'cuts');
+    return c ? [{ id: c.id, name: '🪚 ' + c.name, title: 'Cut planning: stock on hand and the parts to cut from it' }] : [];
+  },
 });
 
 /* ---- summary: every labeled result in the project, under the tabs ---- */
@@ -1834,6 +2289,293 @@ function renderSummary() {
       cont.appendChild(b);
     }
   }
+}
+
+/* ---- the Cuts page panel: parts to cut, cut layouts, volume totals ---- */
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function svgEl(tag, attrs) {
+  const e = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+function partColor(part) {
+  const ci = part.sheet.colors[part.line.id];
+  return PALETTE[ci !== undefined ? ci : part.line.id % PALETTE.length];
+}
+
+function partName(part) {
+  const c = part.entry.comp;
+  return part.line.label
+    || (c && c.w && c.h ? fmt(c.w.si * 1000) + '×' + fmt(c.h.si * 1000) : 'blank');
+}
+
+// Which cut lists are expanded — panel re-renders on every edit, so the
+// open/closed choice lives outside the DOM. Session-only by design.
+const cutListOpen = new Set();
+
+// One stock sheet's layout as SVG, sized in mm so strokes stay proportional.
+function sheetDiagram(sh, multi, key, kerf) {
+  const wrap = document.createElement('div');
+  wrap.className = 'cutsheet';
+  const W = sh.W * 1000;
+  const H = sh.H * 1000;
+
+  const cap = document.createElement('div');
+  cap.className = 'cutcap';
+  const capName = document.createElement('span');
+  capName.textContent = (sh.stock.line.label || 'stock')
+    + (multi ? ' #' + (sh.index + 1) : '')
+    + ' · ' + fmt(W) + ' × ' + fmt(H) + ' mm';
+  const capUsed = document.createElement('span');
+  capUsed.textContent = Math.round((sh.area / (sh.W * sh.H)) * 100) + '% used · '
+    + sh.cuts + (sh.cuts === 1 ? ' cut' : ' cuts');
+  cap.append(capName, capUsed);
+  wrap.appendChild(cap);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'cutsvg' });
+  const sw = Math.max(W, H) / 350;
+  svg.appendChild(svgEl('rect', {
+    x: 0, y: 0, width: W, height: H, class: 'stockrect', 'stroke-width': sw * 1.5,
+  }));
+  // Faint grain strokes across the whole sheet when the stock declares one.
+  const grainLines = (x, y, w, h, axis, cls, stroke) => {
+    const out = [];
+    for (let i = 1; i <= 3; i++) {
+      const f = i / 4;
+      const attrs = axis === 'x'
+        ? { x1: x + w * 0.05, y1: y + h * f, x2: x + w * 0.95, y2: y + h * f }
+        : { x1: x + w * f, y1: y + h * 0.05, x2: x + w * f, y2: y + h * 0.95 };
+      out.push(svgEl('line', { ...attrs, class: cls, 'stroke-width': sw * 0.7, ...(stroke ? { stroke } : {}) }));
+    }
+    return out;
+  };
+  if (sh.grain) for (const ln of grainLines(0, 0, W, H, sh.grain, 'sheetgrain')) svg.appendChild(ln);
+  for (const pl of sh.placed) {
+    const color = partColor(pl.part);
+    const x = pl.x * 1000;
+    const y = pl.y * 1000;
+    const w = pl.w * 1000;
+    const h = pl.h * 1000;
+    const g = svgEl('g', {});
+    const r = svgEl('rect', {
+      x, y, width: w, height: h,
+      fill: color + '2e', stroke: color, 'stroke-width': sw,
+    });
+    const label = pl.part.line.label || fmt(w) + '×' + fmt(h);
+    const title = svgEl('title', {});
+    title.textContent = `${label} — ${fmt(w)} × ${fmt(h)} mm`
+      + (pl.grain ? ` · grain ${pl.grain === 'x' ? '↔' : '↕'}` : '');
+    r.appendChild(title);
+    g.appendChild(r);
+    if (pl.grain) for (const ln of grainLines(x, y, w, h, pl.grain, 'partgrain', color)) g.appendChild(ln);
+    const fs = Math.min(h * 0.42, (w * 0.92) / Math.max(3, label.length * 0.6));
+    if (fs > Math.max(W, H) / 90) {
+      const t = svgEl('text', {
+        x: x + w / 2, y: y + h / 2, class: 'cuttext',
+        'font-size': fs, 'text-anchor': 'middle', 'dominant-baseline': 'central',
+      });
+      t.textContent = label;
+      g.appendChild(t);
+    }
+    svg.appendChild(g);
+  }
+  wrap.appendChild(svg);
+
+  const steps = cutList(sh);
+  if (steps.length) {
+    const det = document.createElement('details');
+    det.className = 'cutlist';
+    det.open = cutListOpen.has(key);
+    det.addEventListener('toggle', () => {
+      if (det.open) cutListOpen.add(key);
+      else cutListOpen.delete(key);
+    });
+    const sum = document.createElement('summary');
+    sum.textContent = 'cut list · ' + sh.cuts + (sh.cuts === 1 ? ' cut' : ' cuts');
+    det.appendChild(sum);
+    const ol = document.createElement('ol');
+    const mm = (x) => fmt(x * 1000) + ' mm';
+    const names = (ps) => {
+      const out = document.createElement('span');
+      [...new Set(ps)].forEach((part, i) => {
+        if (i) out.append(', ');
+        const s = document.createElement('span');
+        s.className = 'cpart';
+        s.style.color = partColor(part);
+        s.textContent = partName(part);
+        out.appendChild(s);
+      });
+      return out;
+    };
+    for (const st of steps) {
+      const li = document.createElement('li');
+      const b = document.createElement('b');
+      b.textContent = mm(st.at);
+      if (st.kind === 'rip') {
+        li.append('rip ', b, ` → strip ${st.strip} · `, names(st.parts));
+      } else if (st.kind === 'cross') {
+        li.append(`strip ${st.strip} · crosscut `, b);
+        if (st.count > 1) li.append(` × ${st.count}`);
+        li.append(' → ', names([st.part]));
+      } else {
+        li.append(`strip ${st.strip} · trim to `, b);
+        if (st.count > 1) li.append(` × ${st.count}`);
+        li.append(' → ', names([st.part]));
+      }
+      ol.appendChild(li);
+    }
+    det.appendChild(ol);
+
+    // What's on the bench afterwards: the blanks, and the keepable offcuts.
+    const y = sheetYield(sh, kerf);
+    const yieldEl = document.createElement('div');
+    yieldEl.className = 'cutyield';
+    const yrow = (label) => {
+      const row = document.createElement('div');
+      row.className = 'yrow';
+      const l = document.createElement('span');
+      l.className = 'ylabel';
+      l.textContent = label;
+      row.appendChild(l);
+      yieldEl.appendChild(row);
+      return row;
+    };
+    const partsRow = yrow('parts');
+    y.parts.forEach((p, i) => {
+      if (i) partsRow.append(' · ');
+      const nm = document.createElement('span');
+      nm.className = 'cpart';
+      nm.style.color = partColor(p.part);
+      nm.textContent = partName(p.part);
+      partsRow.append(nm, ` ${fmt(p.w * 1000)} × ${fmt(p.h * 1000)}`
+        + (p.count > 1 ? ` ×${p.count}` : ''));
+    });
+    const offRow = yrow('offcuts');
+    if (!y.offcuts.length) offRow.append('none');
+    y.offcuts.forEach((o, i) => {
+      if (i) offRow.append(' · ');
+      offRow.append(`${fmt(o.w * 1000)} × ${fmt(o.h * 1000)}`
+        + (o.count > 1 ? ` ×${o.count}` : ''));
+    });
+    det.appendChild(yieldEl);
+    wrap.appendChild(det);
+  }
+  return wrap;
+}
+
+function renderCutsPanel() {
+  const panel = document.getElementById('cutspanel');
+  const p = currentProject();
+  if (!p || !onCutsSheet()) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  panel.textContent = '';
+  const d = cutsData(p);
+
+  const head = document.createElement('div');
+  head.className = 'cutpanelhead';
+  const h = document.createElement('h3');
+  h.textContent = 'Parts to cut';
+  const kerfWrap = document.createElement('label');
+  kerfWrap.className = 'kerf';
+  kerfWrap.append('saw kerf ');
+  const kerfInp = document.createElement('input');
+  kerfInp.type = 'number';
+  kerfInp.step = '0.1';
+  kerfInp.min = '0';
+  kerfInp.max = '20';
+  kerfInp.value = String(d.kerf);
+  kerfInp.title = 'Blade width lost to every cut';
+  kerfInp.addEventListener('change', () => setKerf(kerfInp.value));
+  kerfInp.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') kerfInp.blur();
+  });
+  kerfWrap.appendChild(kerfInp);
+  kerfWrap.append(' mm');
+  head.append(h, kerfWrap);
+  panel.appendChild(head);
+
+  if (!d.parts.length) {
+    const msg = document.createElement('p');
+    msg.className = 'cutempty';
+    msg.textContent = 'No blanks in this project yet. The lines above are your stock '
+      + '(width × height × thickness × qty); add component blanks on the calc sheets '
+      + 'and they queue up here, ready to cut.';
+    panel.appendChild(msg);
+  }
+  for (const g of d.groups) {
+    const gh = document.createElement('div');
+    gh.className = 'cuthead' + (g.t !== null && !g.matched ? ' nomatch' : '');
+    const gl = document.createElement('span');
+    gl.className = 'gt';
+    gl.textContent = g.label + (g.pieces ? ' · ' + fmt(g.pieces) + ' pcs' : '');
+    const gm = document.createElement('span');
+    gm.className = 'gm';
+    gm.textContent = g.t === null
+      ? ''
+      : g.matched ? '✓ ' + g.stockNames.join(', ') : '✗ no stock this thickness';
+    gh.append(gl, gm);
+    panel.appendChild(gh);
+    for (const { sheet, line, entry } of g.parts) {
+      const row = document.createElement('div');
+      row.className = 'cutrow';
+      const nm = document.createElement('span');
+      nm.className = 'cn';
+      nm.textContent = line.label || 'blank';
+      const ci = sheet.colors[line.id];
+      if (ci !== undefined) nm.style.color = PALETTE[ci];
+      const dims = document.createElement('span');
+      dims.className = 'cd';
+      dims.textContent = fmtEntry(entry)
+        + (line.grain ? (line.grain === 'w' ? '  ↔' : '  ↕') : '');
+      const from = document.createElement('span');
+      from.className = 'cs';
+      from.textContent = sheet.name;
+      row.append(nm, dims, from);
+      panel.appendChild(row);
+    }
+    if (g.plan) {
+      for (const sh of g.plan.sheets) {
+        const c = sh.stock.entry.comp;
+        const key = g.label + '|' + sh.stock.line.id + '|' + sh.index;
+        panel.appendChild(sheetDiagram(sh, Math.round(c.n.si) > 1, key, d.kerf / 1000));
+      }
+      if (g.plan.unplaced.length) {
+        // Aggregate leftover pieces per part for one readable warning.
+        const agg = new Map();
+        for (const pc of g.plan.unplaced) {
+          const key = pc.part.sheet.id + ':' + pc.part.line.id;
+          if (!agg.has(key)) agg.set(key, { part: pc.part, n: 0 });
+          agg.get(key).n++;
+        }
+        const warn = document.createElement('div');
+        warn.className = 'cutunplaced';
+        warn.textContent = '✗ no room in stock: '
+          + [...agg.values()].map((a) => `${a.part.line.label || 'blank'} ×${a.n}`).join(', ');
+        panel.appendChild(warn);
+      }
+    }
+  }
+
+  const tot = document.createElement('div');
+  tot.className = 'cuttotals';
+  const seg = (label, value) => {
+    const s = document.createElement('span');
+    const b = document.createElement('b');
+    b.textContent = value;
+    s.append(label + ' ', b);
+    return s;
+  };
+  tot.appendChild(seg('Parts', fmtVol(d.partsVol) + (d.pieces ? ' · ' + fmt(d.pieces) + ' pcs' : '')));
+  tot.appendChild(seg('Stock', fmtVol(d.stockVol)));
+  tot.appendChild(seg('Parts / stock',
+    d.stockVol > 0 ? fmt(Math.round((d.partsVol / d.stockVol) * 100)) + '%' : '—'));
+  panel.appendChild(tot);
 }
 
 /* ---- hover: light up a result and every reference to it ---- */
@@ -1904,6 +2646,7 @@ function migrateProject(p) {
       sheets,
       currentSheetId: sheets.some((s) => s.id === p.currentSheetId) ? p.currentSheetId : sheets[0].id,
       nextSheetId: Number(p.nextSheetId) || Math.max(...sheets.map((s) => s.id)) + 1,
+      ...(typeof p.kerf === 'number' && isFinite(p.kerf) ? { kerf: p.kerf } : {}),
     };
   }
   if (!Array.isArray(p.lines) || !p.lines.length) return null;
@@ -1947,6 +2690,7 @@ function load() {
     }
   } catch { /* corrupt state — start fresh */ }
   if (!projects.length) projects = [freshProject()];
+  for (const p of projects) ensureCutsSheet(p);
   adoptProject(projects.some((p) => p.id === currentId) ? currentId : projects[0].id);
 }
 
@@ -1984,6 +2728,10 @@ linesEl.addEventListener('click', (e) => {
   }
   if (e.target.closest('.addlabel') || e.target.closest('.label')) {
     startLabelEdit(id);
+    return;
+  }
+  if (e.target.closest('.grainbtn')) {
+    cycleGrain(id);
     return;
   }
   if (e.target.closest('.result')) {
@@ -2369,8 +3117,9 @@ clearAllBtn.addEventListener('click', () => {
     disarmClear();
     commitLabelEditFromDom();
     const before = snapshot();
-    state.lines = [{ id: state.nextId++, tokens: [] }];
+    state.lines = [onCutsSheet() ? freshComp() : { id: state.nextId++, tokens: [] }];
     state.activeId = state.lines[0].id;
+    state.part = 'w';
     state.caret = 0;
     state.sel = null;
     state.colors = {};

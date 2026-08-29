@@ -56,7 +56,35 @@ Calculations form a flowing document instead of a single display:
   box — landing on a box with a single value pre-selects it for overwriting, and ⏎ from
   qty starts the next blank. A blank's own value is its total volume (w·h·t·qty), so
   referencing or summing blanks gives material estimates; the resolved dimensions show
-  in the result column. Blanks are the data model for future cut-layout planning.
+  in the result column.
+- **The Cuts page.** Every project carries a pinned **🪚 Cuts** tab at the end of its
+  sheet bar — the cut-planning page. Its lines are your **stock** on hand (materials use
+  the same width × height × thickness × qty boxes as blanks, references included), and
+  every blank on the project's other sheets queues up below as **parts to cut**, grouped
+  by thickness — thinnest first, `1.9cm` folds into the 19 mm group — with each group
+  matched against the stock: `✓ birch ply`, or a red `✗ no stock this thickness`. Volume
+  totals and a parts/stock percentage sit at the bottom. Drag material lines to set which
+  stock gets used first.
+- **Grain direction.** Every blank and material has a small `grain` chip: tap to cycle
+  don't care → **↔ along width** → **↕ along height**. A grain-set part is only ever
+  rotated to *align* with grain-set stock; on stock without grain it keeps its authored
+  orientation, and only don't-care parts rotate freely. Grain shows as faint strokes in
+  the layout diagrams.
+- **Cut layouts.** Each matched thickness group is planned onto its stock: a shelf-based
+  guillotine layout (rip strips, then crosscut) with the **saw kerf** — settable on the
+  panel, per project, default 3 mm — consumed between neighbouring pieces as real
+  geometry. The planner searches candidate layouts (each part type facing either way,
+  same-height-only strips vs. mixed) and keeps the winner by fewest unplaced pieces,
+  fewest sheets, **fewest saw cuts**, shortest packed height — so identical parts end up
+  side by side in uniform strips. Layouts render as to-scale SVG diagrams per stock
+  sheet with utilization and cut count; pieces that fit nowhere are called out in red.
+- **Cut list.** Under each diagram, a collapsible numbered list of the actual saw work:
+  rip the strips off top to bottom, crosscut each strip left to right (identical cuts
+  grouped into one step: `crosscut 900 mm × 2`), then any trims. Every printed dimension
+  is a finished dimension — set the fence to the number and the kerf falls on the waste
+  side. The list ends with the yield: the finished parts, and every keepable offcut with
+  its dimensions (strip tails, trim cutoffs, and the remainder below the last strip,
+  each less the kerf; slivers under 1 mm are dropped).
 - **Labels.** Hover a line and click "label" to name it ("subtotal", "VAT"). The label is
   shown next to the result and inside every reference chip that uses it, so downstream
   lines read like `[subtotal] × 0.25`. Click a label to edit it; clear it to remove it.
@@ -80,6 +108,12 @@ evaluating the longest valid prefix, so half-typed lines still show a live resul
 A component line carries four small token lists instead of one (width, height,
 thickness, quantity), each evaluated the same way; its own value is the product.
 
+The Cuts page is a pinned sheet (`kind: 'cuts'`) whose lines are materials. Planning is
+two pure functions: `planCuts` searches shelf-guillotine layouts (orientation
+assignments × strip disciplines, scored by unplaced / sheets / cut count / packed
+height) and `cutList` turns a placed sheet into ordered saw steps whose counts sum to
+the sheet's cut count. Both run live on every edit.
+
 | File | Role |
 | --- | --- |
 | `index.html` | Layout and keypad |
@@ -98,7 +132,10 @@ input handlers: arithmetic and precedence, live reference propagation, reorderin
 forward references, cycle rejection (and non-termination defense), labels, undo/redo
 coalescing, line deletion freezing/restoring references, units and powered suffixes,
 component blanks (entry flow, unit adoption, volume references, freezing, import),
-projects/sheets/cross-sheet references, storage migration, and number formatting.
+projects/sheets/cross-sheet references, storage migration, number formatting, and the
+Cuts page: thickness grouping and stock matching, kerf, grain rules, layout
+optimization (uniform strips, forced rotation, overflow, stock order), and cut-list
+generation.
 
 ## License & author
 

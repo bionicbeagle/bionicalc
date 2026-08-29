@@ -31,6 +31,7 @@
   <section id="canvas">
     <nav id="sheettabs" aria-label="Sheets"></nav>
     <div id="lines"></div>
+    <div id="cutspanel" hidden></div>
     <p id="hint">
       Type a calculation with your keyboard or the pad, then press ⏎ for a new line.
       Starting a line with an operator continues from the result above.<br><br>
@@ -52,7 +53,14 @@
       Tap <b>blank</b> (or type <b>b</b>) to add a <b>component</b> — width × height ×
       thickness × qty. Each box is a full calculation that can reference other lines;
       ⏎ or Tab hops to the next box, and 600mm × 45 × 19 means mm throughout.
-      A blank's own value is its total volume, ready to sum into material estimates.
+      A blank's own value is its total volume, ready to sum into material estimates.<br><br>
+      The pinned <b>🪚 Cuts</b> tab is the project's cut-planning page: list your
+      <b>stock</b> there as material lines, and every blank in the project queues up
+      underneath as parts to cut, planned onto your stock with the saw's kerf.
+      Tap a blank's <b>grain</b> chip (on materials too) to pin grain direction —
+      ↔ along the width, ↕ along the height. A grain-set part is only ever rotated
+      to align with grain-set stock; otherwise it keeps its orientation, and only
+      don't-care parts rotate freely.
     </p>
   </section>
 
