@@ -816,6 +816,77 @@ function startProjectRename(id) {
   render();
 }
 
+/* ---- export / import ---- */
+
+function exportProjects() {
+  commitLabelEditFromDom();
+  syncCurrentProject();
+  const payload = {
+    app: 'bionicalc',
+    version: 1,
+    exported: new Date().toISOString(),
+    projects,
+    quickUnits,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'bionicalc-' + new Date().toISOString().slice(0, 10) + '.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  toast(`Exported ${projects.length} project${projects.length === 1 ? '' : 's'}`);
+}
+
+// Imported projects are APPENDED as new tabs — an import can never overwrite
+// or delete what's already on the device. Returns how many were added.
+function importProjectsFromData(d) {
+  const okTok = (t) => !!t && (
+    ((t.t === 'n' || t.t === 'u') && typeof t.v === 'string') ||
+    (t.t === 'o' && ['+', '-', '*', '/', '%'].includes(t.v)) ||
+    (t.t === 'p' && (t.v === '(' || t.v === ')')) ||
+    (t.t === 'r' && typeof t.ref === 'number'));
+
+  let incoming = [];
+  if (d && Array.isArray(d.projects)) incoming = d.projects;
+  else if (d && Array.isArray(d.lines)) incoming = [{ name: 'Imported', ...d }];
+
+  const added = [];
+  for (const p of incoming) {
+    if (!p || !Array.isArray(p.lines)) continue;
+    const lines = p.lines
+      .filter((l) => l && typeof l.id === 'number' && Array.isArray(l.tokens))
+      .map((l) => ({
+        id: l.id,
+        tokens: l.tokens.filter(okTok).map((t) => ({ ...t })),
+        ...(l.label ? { label: String(l.label).slice(0, 24) } : {}),
+      }));
+    if (!lines.length) continue;
+    const colors = {};
+    for (const [k, v] of Object.entries(p.colors || {})) {
+      if (Number.isInteger(v)) colors[k] = ((v % PALETTE.length) + PALETTE.length) % PALETTE.length;
+    }
+    added.push({
+      id: nextProjectId++,
+      name: String(p.name || 'Imported').trim().slice(0, 24) || 'Imported',
+      lines,
+      activeId: p.activeId,
+      colors,
+      nextId: Number(p.nextId) || Math.max(...lines.map((l) => l.id)) + 1,
+      nextColor: Number(p.nextColor) || 0,
+    });
+  }
+  if (!added.length) return 0;
+  commitLabelEditFromDom();
+  syncCurrentProject();
+  projects.push(...added);
+  adoptProject(added[0].id);
+  update();
+  return added.length;
+}
+
 function renameProject(id, raw) {
   if (projRenameId !== id) return;
   projRenameId = null;
@@ -1492,6 +1563,25 @@ undoBtn.title = isMac ? 'Undo (⌘Z)' : 'Undo (Ctrl+Z)';
 redoBtn.title = isMac ? 'Redo (⇧⌘Z)' : 'Redo (Ctrl+Y)';
 undoBtn.addEventListener('click', undo);
 redoBtn.addEventListener('click', redo);
+
+document.getElementById('export').addEventListener('click', exportProjects);
+
+const importFile = document.getElementById('import-file');
+document.getElementById('import').addEventListener('click', () => {
+  importFile.value = '';
+  importFile.click();
+});
+importFile.addEventListener('change', () => {
+  const f = importFile.files && importFile.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let n = 0;
+    try { n = importProjectsFromData(JSON.parse(reader.result)); } catch { /* invalid JSON */ }
+    toast(n ? `Imported ${n} project${n === 1 ? '' : 's'}` : "Couldn't read that file");
+  };
+  reader.readAsText(f);
+});
 
 const clearAllBtn = document.getElementById('clear-all');
 let clearArm = null;

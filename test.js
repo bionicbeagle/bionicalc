@@ -362,4 +362,38 @@ check('adopted document is project 1', t('state.lines.length'), p1Lines);
   check('migration: saved in new format', m('JSON.parse(localStorage.getItem("bionicalc.v1")).projects.length'), 1);
 }
 
+// 39. Import appends sanitized projects (never overwrites)
+const before39 = t('projects.length');
+const payload = {
+  app: 'bionicalc',
+  version: 1,
+  projects: [
+    {
+      name: '  Deck  ',
+      lines: [
+        { id: 1, tokens: [{ t: 'n', v: '2' }, { t: 'o', v: '*' }, { t: 'n', v: '3' }] },
+        { id: 2, tokens: [{ t: 'r', ref: 1 }, { t: 'o', v: '+' }, { t: 'n', v: '4' }] },
+      ],
+      activeId: 2, colors: { 1: 99 }, nextId: 3, nextColor: 1,
+    },
+    { name: 'Units', lines: [{ id: 1, tokens: [{ t: 'n', v: '5' }, { t: 'u', v: 'cm' }, { t: 'bogus' }, null] }], nextId: 2 },
+  ],
+};
+check('import returns count', t(`importProjectsFromData(${JSON.stringify(payload)})`), 2);
+check('existing projects untouched', t('projects.length'), before39 + 2);
+check('first imported project adopted, name trimmed',
+  t('projects.find(p => p.id === currentProjectId).name'), 'Deck');
+check('imported references evaluate', res(1), 10);
+check('imported color index sanitized', t('state.colors[1] >= 0 && state.colors[1] < 8'), true);
+t('switchProject(projects[projects.length - 1].id)');
+check('malformed tokens filtered out', t('state.lines[0].tokens.length'), 2);
+check('imported units evaluate', lastVal(), '5 cm');
+
+// 40. Garbage is rejected; legacy single-document files wrap into a project
+check('garbage import rejected', t('importProjectsFromData({ nope: true })'), 0);
+check('legacy single-doc import wraps',
+  t('importProjectsFromData({ lines: [{ id: 1, tokens: [{ t: "n", v: "9" }] }] })'), 1);
+check('legacy import named', t('projects[projects.length - 1].name'), 'Imported');
+check('legacy import evaluates', res(0), 9);
+
 process.exit(failures ? 1 : 0);
