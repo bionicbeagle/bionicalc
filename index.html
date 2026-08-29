@@ -48,7 +48,11 @@
       with its own undo. Tap the active tab to rename it.<br><br>
       Keep master parameters on one sheet and <b>label</b> them — they appear in the
       <b>summary</b> under the project tabs (and behind the <b>ref</b> key), ready to
-      insert as live values anywhere in the project.
+      insert as live values anywhere in the project.<br><br>
+      Tap <b>blank</b> (or type <b>b</b>) to add a <b>component</b> — width × height ×
+      thickness × qty. Each box is a full calculation that can reference other lines;
+      ⏎ or Tab hops to the next box, and 600mm × 45 × 19 means mm throughout.
+      A blank's own value is its total volume, ready to sum into material estimates.
     </p>
   </section>
 
@@ -90,6 +94,8 @@
     </div>
     <div id="padrow">
       <button id="refbtn" class="key fn" title="Insert a value from another sheet">ref</button>
+      <button id="blankbtn" class="key fn" data-key="blank"
+        title="Add a component blank: width × height × thickness × qty">blank</button>
       <button id="newline" class="key" data-key="enter">new line&ensp;⏎</button>
     </div>
     <div id="unitpop" hidden></div>

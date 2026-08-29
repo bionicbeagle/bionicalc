@@ -292,6 +292,63 @@ main {
 
 @keyframes blink { 50% { opacity: 0; } }
 
+/* ---------- component ("blank") lines ---------- */
+
+.tokens.comp {
+  align-items: flex-end;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.csep {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: 0.6em;
+  padding: 0 4px 10px;
+}
+
+.cfield {
+  display: flex;
+  flex-direction: column;
+  min-width: 54px;
+  padding: 3px 8px 4px;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1.5px var(--border);
+  cursor: text;
+}
+
+.cfield.focus {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.cfield .cap {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.cfield .cbody {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  min-height: 1.35em;
+  font-size: 0.74em;
+  font-weight: 400;
+}
+
+.cfield .cph { color: var(--muted); }
+
+.result .cdims {
+  font-size: 17px;
+  white-space: nowrap;
+}
+
+.result .cdims.pending { color: var(--muted); font-weight: 400; }
+
 /* ---------- results ---------- */
 
 .result {
@@ -638,11 +695,12 @@ main {
 
 #padrow {
   display: grid;
-  grid-template-columns: 1fr 3fr;
+  grid-template-columns: 1fr 1fr 2fr;
   gap: 10px;
 }
 
-#refbtn {
+#refbtn,
+#blankbtn {
   height: 52px;
   font-size: 15px;
 }
@@ -798,6 +856,7 @@ footer a:hover { color: var(--text); }
   .ukey { height: 42px; }
   .line { font-size: 23px; min-height: 48px; }
   .result { font-size: 21px; }
+  .result .cdims { font-size: 15px; }
 
   #unitpop, #refpop {
     bottom: 120px;

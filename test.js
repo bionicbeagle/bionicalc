@@ -560,4 +560,123 @@ t('(() => { const src = state.lines[state.lines.length - 2]; const b = snapshot(
 check('powered unit frozen on delete', lastVal(), '4 m²');
 check('frozen token keeps its power', t('state.lines[state.lines.length - 1].tokens[1].v'), 'm2');
 
+// 49. Component blanks: create with "b", fill w/h/t, unitless parts adopt mm
+NL();
+keys(['b']);
+check('b on an empty line makes a component', t('activeLine().kind'), 'comp');
+check('quantity prefilled with 1', t('activeLine().parts.n[0].v'), '1');
+keys(['1', '2', '0', 'm', 'm', 'enter', '4', '5', 'enter', '1', '9', 'enter']);
+check('dims resolve, unitless adopts mm', t('fmtComp(results.get(state.activeId))'), '120 × 45 × 19 mm ×1');
+check('component value is total volume', lastVal(), '102,600 mm³');
+keys(['4']);
+check('enter lands on qty pre-selected: typing replaces the 1', lastVal(), '410,400 mm³');
+
+// 50. Enter from qty begets another component; b toggles a pristine one back
+keys(['enter']);
+check('enter from a component adds a component', t('activeLine().kind'), 'comp');
+check('the new component is pristine', t('compIsPristine(activeLine())'), true);
+keys(['b']);
+check('b converts a pristine component back', t('activeLine().kind === undefined'), true);
+check('parts removed on conversion', t('activeLine().parts === undefined'), true);
+
+// 51. Component parts reference other lines and stay live
+keys(['6', '0', '0', 'm', 'm']);
+const src600 = t('state.activeId');
+keys(['b']); // non-empty line: b inserts a new component after it
+check('b after a full line inserts a component', t('activeLine().kind'), 'comp');
+t(`insertRefFrom(${src600})`);
+keys(['-', '4', '0', 'enter', '4', '5', 'enter', '1', '9', 'enter', '2']);
+const compA = t('state.activeId');
+check('width = [600 mm] − 40', t(`fmtComp(results.get(${compA}))`), '560 × 45 × 19 mm ×2');
+check('volume follows', lastVal(), '957,600 mm³');
+t(`state.activeId = ${src600}; state.sel = { idx: 0 };`);
+keys(['5', '0', '0']);
+check('editing the source updates the blank', t(`fmtComp(results.get(${compA}))`), '460 × 45 × 19 mm ×2');
+
+// 52. Referencing a component yields its volume; a unit suffix converts it
+t(`state.activeId = ${compA}; caretToEnd(); state.sel = null;`);
+keys(['enter', 'b']); // component + toggle back = calc line after a component
+t(`insertRefFrom(${compA})`);
+keys(['l']);
+const volLine = t('state.activeId');
+check('[blank] l converts total volume to liters', lastVal(), '0.7866 l');
+
+// 53. Quantity must be a bare number; unitless components work.
+// (Keyboard "b" right after the unit "l" completes "lb" instead — the pad
+// key is unambiguous.)
+check('b after l extends the unit to lb', t('(() => { const n = curToks().length; press("b"); const v = curToks()[n - 1].v; press("backspace"); return v; })()'), 'lb');
+keys(['blank']);
+keys(['1', '0', 'enter', '1', '0', 'enter', '1', '0', 'enter', '2', 'm', 'm']);
+check('unit on qty is an error', t('results.get(state.activeId).err'), 'unit error');
+keys(['backspace', 'backspace']);
+check('all-unitless component evaluates plain', lastVal(), '2,000');
+
+// 54. Deleting a referenced component freezes its volume downstream
+t(`(() => { const b = snapshot(); removeLine(${compA}); commitHistory(b, null); update(); })()`);
+check('volume frozen on component delete', t(`fmtVal(results.get(${volLine}))`), '0.7866 l');
+check('frozen to number + unit', t(`state.lines.find(l => l.id === ${volLine}).tokens.slice(0, 2).map(x => x.t).join("")`), 'nu');
+check('frozen unit keeps its power', t(`state.lines.find(l => l.id === ${volLine}).tokens[1].v`), 'mm3');
+
+// 55. Deleting a line referenced BY a component part freezes inside the part
+t('state.activeId = state.lines[state.lines.length - 1].id; caretToEnd(); state.sel = null;');
+keys(['enter', 'b']);
+keys(['1', '0', '0', 'm', 'm']);
+const src100 = t('state.activeId');
+keys(['b']);
+t(`insertRefFrom(${src100})`);
+keys(['enter', '5', 'enter', '5', 'enter']);
+const compB = t('state.activeId');
+check('setup: [100 mm] × 5 × 5', lastVal(), '2,500 mm³');
+t(`(() => { const b = snapshot(); removeLine(${src100}); commitHistory(b, null); update(); })()`);
+check('part frozen to number + unit', t(`state.lines.find(l => l.id === ${compB}).parts.w.map(x => x.t).join("")`), 'nu');
+check('volume unchanged after freeze', lastVal(), '2,500 mm³');
+
+// 56. Cycles through component parts are rejected
+t(`state.activeId = ${compB}; caretToEnd(); state.sel = null;`);
+keys(['enter', 'b']);
+t(`insertRefFrom(${compB})`);
+const cycLine = t('state.activeId');
+t(`state.activeId = ${compB}; state.part = 'w'; state.caret = state.lines.find(l => l.id === ${compB}).parts.w.length; state.sel = null;`);
+t(`insertRefFrom(${cycLine})`);
+check('cycle through a part rejected', t(`state.lines.find(l => l.id === ${compB}).parts.w.length`), 2);
+
+// 57. Undo steps: new line, blank conversion, coalesced digits
+t('state.activeId = state.lines[state.lines.length - 1].id; caretToEnd(); state.sel = null; update();');
+const compStack = t('undoStack.length');
+keys(['enter', 'b', '1', '2']);
+check('enter + b + digits = 3 undo steps', t('undoStack.length'), compStack + 3);
+t('undo()');
+check('undo clears the typed width', t('activeLine().parts.w.length'), 0);
+t('undo()');
+check('second undo reverts to a calc line', t('activeLine().kind === undefined'), true);
+t('undo()');
+
+// 58. Arrow keys and backspace hop between parts
+keys(['enter', 'b']); // fresh component (last line is non-empty after undos)
+keys(['2', '0', 'm', 'm', 'enter', '2', 'c', 'm', 'enter', '5', 'm', 'm', 'enter']);
+check('mixed units shown per part', t('fmtComp(results.get(state.activeId))'), '20 mm × 2 cm × 5 mm ×1');
+check('mixed units compose the volume', lastVal(), '2,000 mm³');
+keys(['left', 'left']);
+check('left from qty start hops to thickness', t('state.part'), 't');
+t('state.caret = 0;');
+keys(['backspace']);
+check('backspace at part start hops back', t('state.part'), 'h');
+check('caret lands at the end of that part', t('state.caret'), 2);
+
+// 59. Components survive export/import (live part refs included)
+t('state.activeId = state.lines[state.lines.length - 1].id; caretToEnd(); state.sel = null;');
+keys(['enter', 'b', '3', '0', 'm', 'm']);
+const src30 = t('state.activeId');
+keys(['b']);
+t(`insertRefFrom(${src30})`);
+keys(['*', '2', 'enter', '5', 'enter', '5', 'enter']);
+check('setup: [30 mm] × 2 wide', lastVal(), '1,500 mm³');
+const compCount = t('state.lines.filter(l => l.kind === "comp").length');
+const rtComp = t('JSON.stringify({ projects: [JSON.parse(JSON.stringify(currentProject()))] })');
+check('re-import with components', t(`importProjectsFromData(${rtComp})`), 1);
+t('switchSheet(currentProject().sheets[1].id)');
+check('component lines survive import', t('state.lines.filter(l => l.kind === "comp").length'), compCount);
+check('first imported blank intact', t('fmtComp(results.get(state.lines.find(l => l.kind === "comp").id))'), '120 × 45 × 19 mm ×4');
+check('part ref still live after import', t('fmtComp(results.get(state.lines.filter(l => l.kind === "comp").pop().id))'), '60 × 5 × 5 mm ×1');
+
 process.exit(failures ? 1 : 0);

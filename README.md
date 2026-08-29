@@ -48,8 +48,15 @@ Calculations form a flowing document instead of a single display:
   (`[15 cm] mm → 150 mm`, `[4,224 mm²] cm2 → 42.24 cm²`);
   incompatible dimensions (`kg + cm`) show a unit error. Supported: length (mm cm m km
   in ft yd mi), mass (mg g kg oz lb t), time (ms s min h d), volume (ml cl dl l gal).
-- **Continue from the last answer.** Press an operator on an empty line and the previous
-  result is pulled in automatically.
+- **Component blanks.** Tap `blank` (or type `b`) to turn the current empty line into a
+  component: width × height × thickness × qty, each box a full calculation of its own.
+  Boxes can reference other lines (`[carcase width] − 2 × 18mm`), so a parts list stays
+  live as the design changes. Unitless dimensions adopt a sibling's unit (`600mm × 45 ×
+  19` means mm throughout), quantity must be a bare number, and ⏎/Tab hop to the next
+  box — landing on a box with a single value pre-selects it for overwriting, and ⏎ from
+  qty starts the next blank. A blank's own value is its total volume (w·h·t·qty), so
+  referencing or summing blanks gives material estimates; the resolved dimensions show
+  in the result column. Blanks are the data model for future cut-layout planning.
 - **Labels.** Hover a line and click "label" to name it ("subtotal", "VAT"). The label is
   shown next to the result and inside every reference chip that uses it, so downstream
   lines read like `[subtotal] × 0.25`. Click a label to edit it; clear it to remove it.
@@ -65,11 +72,13 @@ Calculations form a flowing document instead of a single display:
 
 ## Architecture
 
-Each line is a token list (`number | operator | paren | reference`). References form a
-cycle-free graph: an insertion that would close a loop is refused up front, and evaluation
-resolves references recursively with memoization, so results are independent of document
-order and lines can be reordered freely. Incomplete input is handled by evaluating the
-longest valid prefix, so half-typed lines still show a live result.
+Each line is a token list (`number | operator | paren | unit | reference`). References
+form a cycle-free graph: an insertion that would close a loop is refused up front, and
+evaluation resolves references recursively with memoization, so results are independent
+of document order and lines can be reordered freely. Incomplete input is handled by
+evaluating the longest valid prefix, so half-typed lines still show a live result.
+A component line carries four small token lists instead of one (width, height,
+thickness, quantity), each evaluated the same way; its own value is the product.
 
 | File | Role |
 | --- | --- |
@@ -87,7 +96,9 @@ node test.js
 No dependencies — the suite stubs the DOM, loads the real `app.js`, and drives the actual
 input handlers: arithmetic and precedence, live reference propagation, reordering with
 forward references, cycle rejection (and non-termination defense), labels, undo/redo
-coalescing, line deletion freezing/restoring references, and number formatting.
+coalescing, line deletion freezing/restoring references, units and powered suffixes,
+component blanks (entry flow, unit adoption, volume references, freezing, import),
+projects/sheets/cross-sheet references, storage migration, and number formatting.
 
 ## License & author
 

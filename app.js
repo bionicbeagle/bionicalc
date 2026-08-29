@@ -14,6 +14,11 @@
  * OR below and can be freely reordered. Evaluation resolves references
  * recursively with memoization; any edit re-evaluates everything, which is
  * what makes dependent results update on the fly.
+ *
+ * A line with kind:'comp' is a COMPONENT BLANK instead of a token stream:
+ * four small streams (parts.w/h/t/n — width, height, thickness, quantity),
+ * each evaluated like a line of its own. Referencing a component yields its
+ * total volume w·h·t·n, so blanks can be summed into material estimates.
  */
 
 const PALETTE = [
@@ -82,6 +87,7 @@ const state = {
   lines: [],      // [{ id, tokens: [...] }]
   activeId: null,
   caret: 0,       // token index within the active line (between tokens)
+  part: 'w',      // which stream of a component line the caret is in
   sel: null,      // { idx } — number/ref token in the active line, selected for retyping
   colors: {},     // lineId -> palette index, assigned when a line is first referenced
   nextId: 1,
@@ -124,6 +130,46 @@ function promoteQuickUnit(sym) {
 
 const activeLine = () => state.lines.find((l) => l.id === state.activeId);
 const activeIndex = () => state.lines.findIndex((l) => l.id === state.activeId);
+
+/* ---- component ("blank") lines ---- */
+
+const PART_KEYS = ['w', 'h', 't', 'n'];
+const PART_LABELS = { w: 'width', h: 'height', t: 'thickness', n: 'qty' };
+
+// The token stream under the caret: a calc line's tokens, or the active
+// part of a component line.
+function curToks() {
+  const l = activeLine();
+  if (!l) return [];
+  return l.kind === 'comp' ? l.parts[state.part] : l.tokens;
+}
+
+// "End of line" for either kind: a component's caret lands after its qty.
+function caretToEnd() {
+  const l = activeLine();
+  if (l && l.kind === 'comp') state.part = 'n';
+  state.caret = curToks().length;
+}
+
+function freshComp() {
+  return {
+    id: state.nextId++, kind: 'comp', tokens: [],
+    parts: { w: [], h: [], t: [], n: [{ t: 'n', v: '1' }] },
+  };
+}
+
+// Untouched apart from the prefilled quantity of 1.
+const compIsPristine = (l) =>
+  !l.parts.w.length && !l.parts.h.length && !l.parts.t.length &&
+  (!l.parts.n.length ||
+    (l.parts.n.length === 1 && l.parts.n[0].t === 'n' && l.parts.n[0].v === '1'));
+
+const tokenStreams = (line) =>
+  line.kind === 'comp' ? PART_KEYS.map((k) => line.parts[k]) : [line.tokens];
+
+// A result entry a reference can consume. Component entries exist as soon as
+// any part is filled in but only carry a value once every part does.
+const hasVal = (r) => !!r && !r.err && r.si !== undefined;
 
 // Tokens that can end an operand — a binary operator may follow these.
 const isValue = (t) =>
@@ -269,7 +315,7 @@ function parseTokens(tokens, resolve) {
     if (tok.t === 'r') {
       i++;
       const r = resolve(tok);
-      if (!r || r.err) fail();
+      if (!hasVal(r)) fail();
       return { si: r.si, dim: r.dim, unit: r.unit };
     }
     if (tok.t === 'p' && tok.v === '(') {
@@ -313,18 +359,22 @@ function evaluateAll() {
     if (!line) return { err: '—' };
     visiting.add(key);
     let r;
-    const t = cleanTokens(line.tokens);
-    if (!t.length) r = null;
-    else {
-      try {
-        const V = parseTokens(t, (tok) =>
-          evalLine(tok.sheet !== undefined ? tok.sheet : sid, tok.ref));
-        // r.v is the magnitude in the display unit (equals si when unitless).
-        r = isFinite(V.si)
-          ? { v: V.si / unitFactor(V.unit), si: V.si, dim: V.dim, unit: V.unit }
-          : { err: 'Error' };
-      } catch (e) {
-        r = { err: e === UNIT_ERR ? 'unit error' : '—' };
+    const resolve = (tok) => evalLine(tok.sheet !== undefined ? tok.sheet : sid, tok.ref);
+    if (line.kind === 'comp') {
+      r = evalComp(line, resolve);
+    } else {
+      const t = cleanTokens(line.tokens);
+      if (!t.length) r = null;
+      else {
+        try {
+          const V = parseTokens(t, resolve);
+          // r.v is the magnitude in the display unit (equals si when unitless).
+          r = isFinite(V.si)
+            ? { v: V.si / unitFactor(V.unit), si: V.si, dim: V.dim, unit: V.unit }
+            : { err: 'Error' };
+        } catch (e) {
+          r = { err: e === UNIT_ERR ? 'unit error' : '—' };
+        }
       }
     }
     visiting.delete(key);
@@ -345,6 +395,47 @@ function evaluateAll() {
   return view;
 }
 
+// Evaluate a component blank. Width/height/thickness must be lengths — a
+// unitless one adopts the first sibling's unit, so 600mm × 45 × 19 means mm
+// throughout — and quantity must be a bare number. The entry always carries
+// the per-part results in `comp`; once every part is filled in it also
+// carries a value like any line: the total volume w·h·t·n.
+function evalComp(line, resolve) {
+  const comp = {};
+  let err = null;
+  let missing = false;
+  for (const k of PART_KEYS) {
+    const t = cleanTokens(line.parts[k]);
+    if (!t.length) { comp[k] = null; missing = true; continue; }
+    try {
+      const V = parseTokens(t, resolve);
+      if (!isFinite(V.si)) { comp[k] = null; err = err || 'Error'; continue; }
+      const ok = k === 'n' ? dimless(V.dim) : dimless(V.dim) || sameDim(V.dim, { L: 1 });
+      if (!ok) err = err || 'unit error';
+      comp[k] = { v: V.si / unitFactor(V.unit), si: V.si, dim: V.dim, unit: V.unit };
+    } catch (e) {
+      comp[k] = null;
+      err = err || (e === UNIT_ERR ? 'unit error' : '—');
+    }
+  }
+  const donor = ['w', 'h', 't'].map((k) => comp[k]).find((e) => e && !dimless(e.dim));
+  if (donor) {
+    for (const k of ['w', 'h', 't']) {
+      const e = comp[k];
+      if (e && dimless(e.dim)) {
+        comp[k] = { v: e.si, si: e.si * unitFactor(donor.unit), dim: donor.dim, unit: donor.unit };
+      }
+    }
+  }
+  if (err) return { err, comp };
+  if (missing) return { comp };
+  const si = comp.w.si * comp.h.si * comp.t.si * comp.n.si;
+  const dim = addDims(addDims(comp.w.dim, comp.h.dim, 1), comp.t.dim, 1);
+  const unit = composeUnits(composeUnits(comp.w.unit, comp.h.unit, 1), comp.t.unit, 1);
+  if (!isFinite(si)) return { err: 'Error', comp };
+  return { v: si / unitFactor(unit), si, dim, unit, comp };
+}
+
 // Does line (aSheetId, aLineId) transitively depend on line (bSheetId,
 // bLineId)? Used to refuse reference insertions that would close a cycle,
 // across sheets included.
@@ -359,8 +450,8 @@ function dependsOn(aSheetId, aLineId, bSheetId, bLineId) {
     seen.add(key);
     const s = p.sheets.find((x) => x.id === sid);
     const line = s && s.lines.find((l) => l.id === lid);
-    return !!line && line.tokens.some((t) =>
-      t.t === 'r' && walk(t.sheet !== undefined ? t.sheet : sid, t.ref));
+    return !!line && tokenStreams(line).some((ts) => ts.some((t) =>
+      t.t === 'r' && walk(t.sheet !== undefined ? t.sheet : sid, t.ref)));
   };
   return walk(aSheetId, aLineId);
 }
@@ -396,6 +487,27 @@ function fmtVal(r) {
   return fmt(r.v) + (u ? ' ' + u : '');
 }
 
+// A component's resolved dimensions: "120 × 45 × 19 mm ×4". The unit is
+// shown once when all three dimensions share it; a missing part shows "…".
+function fmtComp(r) {
+  const c = r.comp;
+  const dims = ['w', 'h', 't'];
+  const units = dims.map((k) => (c[k] ? fmtUnit(c[k].unit) : null));
+  const shared = units[0] && units.every((u) => u === units[0]);
+  const body = shared
+    ? dims.map((k) => fmt(c[k].v)).join(' × ') + ' ' + units[0]
+    : dims.map((k) => (c[k] ? fmtVal(c[k]) : '…')).join(' × ');
+  return body + ' ×' + (c.n ? fmt(c.n.v) : '…');
+}
+
+// One-line text for any result entry (summary rows, reference pickers).
+function fmtEntry(entry) {
+  if (!entry) return '…';
+  if (entry.err) return entry.err;
+  if (entry.comp) return fmtComp(entry);
+  return fmtVal(entry);
+}
+
 // Display a number token as typed, with thousands grouping.
 function fmtNum(raw) {
   const neg = raw.startsWith('-');
@@ -408,7 +520,7 @@ function fmtNum(raw) {
 /* ================= editing ================= */
 
 function insertToken(tok) {
-  activeLine().tokens.splice(state.caret++, 0, tok);
+  curToks().splice(state.caret++, 0, tok);
 }
 
 function deselect() {
@@ -416,25 +528,25 @@ function deselect() {
 }
 
 // Merge two adjacent number tokens (arises after deleting the operator between them).
-function mergeAt(line, i) {
-  const a = line.tokens[i - 1];
-  const b = line.tokens[i];
+function mergeAt(toks, i) {
+  const a = toks[i - 1];
+  const b = toks[i];
   if (a && b && a.t === 'n' && b.t === 'n') {
     a.v += a.v.includes('.') ? b.v.replace('.', '') : b.v;
-    line.tokens.splice(i, 1);
+    toks.splice(i, 1);
   }
 }
 
 function inputDigit(d) {
-  const line = activeLine();
+  const toks = curToks();
   if (state.sel) {
     // A selected number/ref is replaced wholesale, like selected text.
-    line.tokens[state.sel.idx] = { t: 'n', v: d === '.' ? '0.' : d };
+    toks[state.sel.idx] = { t: 'n', v: d === '.' ? '0.' : d };
     state.caret = state.sel.idx + 1;
     state.sel = null;
     return;
   }
-  const prev = line.tokens[state.caret - 1];
+  const prev = toks[state.caret - 1];
   // A 2 or 3 right after a complete unit binds as its power: "cm2" is cm².
   if (prev && prev.t === 'u' && (d === '2' || d === '3') && UNITS[prev.v]) {
     prev.v += d;
@@ -447,7 +559,7 @@ function inputDigit(d) {
     return;
   }
   if (isValue(prev)) insertToken({ t: 'o', v: '*' });
-  const next = line.tokens[state.caret];
+  const next = toks[state.caret];
   if (next && next.t === 'n' && !(d === '.' && next.v.includes('.'))) {
     next.v = (d === '.' ? '0.' : d) + next.v;
     state.caret++;
@@ -458,12 +570,12 @@ function inputDigit(d) {
 
 function inputOp(op) {
   deselect();
-  const line = activeLine();
-  const prev = line.tokens[state.caret - 1];
+  const toks = curToks();
+  const prev = toks[state.caret - 1];
   if (!prev) {
     if (op === '-') { insertToken({ t: 'o', v: '-' }); return; }
     // Operator on an empty line continues from the nearest result above.
-    if (line.tokens.length === 0 && autoRef()) insertToken({ t: 'o', v: op });
+    if (toks.length === 0 && autoRef()) insertToken({ t: 'o', v: op });
     return;
   }
   if (prev.t === 'o' && prev.v !== '%') {
@@ -482,9 +594,9 @@ function inputOp(op) {
 // (tapping cm then mm should correct the unit, not concatenate letters).
 // Tapping the SAME unit again cycles its power: cm → cm² → cm³ → cm.
 function inputUnit(sym) {
-  const line = activeLine();
+  const toks = curToks();
   if (state.sel) { state.caret = state.sel.idx + 1; state.sel = null; }
-  const prev = line.tokens[state.caret - 1];
+  const prev = toks[state.caret - 1];
   if (prev && prev.t === 'u') {
     const cur = parseUnitTok(prev.v);
     if (cur.sym === sym) prev.v = sym + (cur.e === 1 ? '2' : cur.e === 2 ? '3' : '');
@@ -497,9 +609,9 @@ function inputUnit(sym) {
 // Letters typed after a value build a unit token, validated live: a letter
 // is accepted only while the string remains a prefix of some known unit.
 function inputUnitLetter(ch) {
-  const line = activeLine();
+  const toks = curToks();
   if (state.sel) { state.caret = state.sel.idx + 1; state.sel = null; }
-  const prev = line.tokens[state.caret - 1];
+  const prev = toks[state.caret - 1];
   if (prev && prev.t === 'u') {
     const nv = prev.v + ch;
     if (isUnitPrefix(nv)) prev.v = nv;
@@ -510,20 +622,20 @@ function inputUnitLetter(ch) {
 
 function inputPercent() {
   deselect();
-  if (isValue(activeLine().tokens[state.caret - 1])) insertToken({ t: 'o', v: '%' });
+  if (isValue(curToks()[state.caret - 1])) insertToken({ t: 'o', v: '%' });
 }
 
 function inputParen(p) {
   deselect();
-  const line = activeLine();
-  const prev = line.tokens[state.caret - 1];
+  const toks = curToks();
+  const prev = toks[state.caret - 1];
   if (p === '(') {
     if (isValue(prev)) insertToken({ t: 'o', v: '*' });
     insertToken({ t: 'p', v: '(' });
   } else {
     let depth = 0;
     for (let i = 0; i < state.caret; i++) {
-      const t = line.tokens[i];
+      const t = toks[i];
       if (t.t === 'p') depth += t.v === '(' ? 1 : -1;
     }
     if (depth > 0 && isValue(prev)) insertToken({ t: 'p', v: ')' });
@@ -532,38 +644,101 @@ function inputParen(p) {
 
 function backspace() {
   const line = activeLine();
+  const toks = curToks();
   if (state.sel) {
-    line.tokens.splice(state.sel.idx, 1);
+    toks.splice(state.sel.idx, 1);
     state.caret = state.sel.idx;
     state.sel = null;
-    mergeAt(line, state.caret);
+    mergeAt(toks, state.caret);
     return;
   }
   if (state.caret === 0) {
+    // In a component, back out of this part into the previous one first.
+    if (line.kind === 'comp' && state.part !== 'w') {
+      state.part = PART_KEYS[PART_KEYS.indexOf(state.part) - 1];
+      state.caret = curToks().length;
+      return;
+    }
     const idx = activeIndex();
     if (idx > 0) {
-      if (line.tokens.length === 0) removeLine(line.id);
+      const empty = line.kind === 'comp' ? compIsPristine(line) : line.tokens.length === 0;
+      if (empty) removeLine(line.id);
       else {
         state.activeId = state.lines[idx - 1].id;
-        state.caret = state.lines[idx - 1].tokens.length;
+        caretToEnd();
       }
     }
     return;
   }
-  const prev = line.tokens[state.caret - 1];
+  const prev = toks[state.caret - 1];
   if ((prev.t === 'n' || prev.t === 'u') && prev.v.length > 1) prev.v = prev.v.slice(0, -1);
   else {
-    line.tokens.splice(--state.caret, 1);
-    mergeAt(line, state.caret);
+    toks.splice(--state.caret, 1);
+    mergeAt(toks, state.caret);
   }
 }
 
+// Enter at the end of a line: a component begets another component (filling
+// in a parts list), a calc line begets a calc line.
 function newLine() {
   const line = activeLine();
-  if (line.tokens.length === 0) return;
-  const nl = { id: state.nextId++, tokens: [] };
+  if (line.kind === 'comp' ? compIsPristine(line) : line.tokens.length === 0) return;
+  const nl = line.kind === 'comp' ? freshComp() : { id: state.nextId++, tokens: [] };
   state.lines.splice(activeIndex() + 1, 0, nl);
   state.activeId = nl.id;
+  state.part = 'w';
+  state.caret = 0;
+  state.sel = null;
+}
+
+// Move the caret to an adjacent part of a component line. A part holding a
+// single number/ref is selected on arrival so typing overwrites it — most
+// usefully the prefilled quantity of 1.
+function stepPart(d) {
+  const l = activeLine();
+  if (!l || l.kind !== 'comp') return;
+  const pi = PART_KEYS.indexOf(state.part) + d;
+  if (pi < 0 || pi >= PART_KEYS.length) return;
+  state.part = PART_KEYS[pi];
+  const toks = curToks();
+  if (toks.length === 1 && (toks[0].t === 'n' || toks[0].t === 'r')) {
+    state.sel = { idx: 0 };
+    state.caret = 1;
+  } else {
+    state.sel = null;
+    state.caret = toks.length;
+  }
+}
+
+// The blank key: turn an empty line into a component, turn an untouched
+// component back into a plain line, or add a new component after this line.
+function blankToggle() {
+  const line = activeLine();
+  if (line.kind === 'comp') {
+    if (compIsPristine(line)) {
+      delete line.kind;
+      delete line.parts;
+      state.caret = 0;
+      state.sel = null;
+    } else insertCompAfter();
+    return;
+  }
+  if (!line.tokens.length) {
+    line.kind = 'comp';
+    line.parts = { w: [], h: [], t: [], n: [{ t: 'n', v: '1' }] };
+    state.part = 'w';
+    state.caret = 0;
+    state.sel = null;
+    return;
+  }
+  insertCompAfter();
+}
+
+function insertCompAfter() {
+  const nl = freshComp();
+  state.lines.splice(activeIndex() + 1, 0, nl);
+  state.activeId = nl.id;
+  state.part = 'w';
   state.caret = 0;
   state.sel = null;
 }
@@ -578,7 +753,7 @@ function autoRef() {
   const idx = activeIndex();
   for (let i = idx - 1; i >= 0; i--) {
     const r = results.get(state.lines[i].id);
-    if (r && !r.err) {
+    if (hasVal(r)) {
       ensureColor(state.lines[i].id);
       insertToken({ t: 'r', ref: state.lines[i].id });
       return true;
@@ -592,17 +767,17 @@ function insertRefFrom(srcId) {
   if (srcId === state.activeId) { toast("A calculation can't use its own result"); return; }
   if (dependsOn(csId, srcId, csId, state.activeId)) { toast('That would create a circular reference'); return; }
   const r = results.get(srcId);
-  if (!r || r.err) { toast('That line has no result yet'); return; }
+  if (!hasVal(r)) { toast('That line has no result yet'); return; }
 
   const before = snapshot();
-  const line = activeLine();
+  const toks = curToks();
   ensureColor(srcId);
   if (state.sel) {
-    line.tokens[state.sel.idx] = { t: 'r', ref: srcId };
+    toks[state.sel.idx] = { t: 'r', ref: srcId };
     state.caret = state.sel.idx + 1;
     state.sel = null;
   } else {
-    if (isValue(line.tokens[state.caret - 1])) insertToken({ t: 'o', v: '*' });
+    if (isValue(toks[state.caret - 1])) insertToken({ t: 'o', v: '*' });
     insertToken({ t: 'r', ref: srcId });
   }
   commitHistory(before, null);
@@ -631,21 +806,21 @@ function insertCrossRef(sheetId, lineId) {
   if (!src) return;
   if (sheetId === p.currentSheetId) { insertRefFrom(lineId); return; }
   const entry = projResults.get(sheetId + ':' + lineId);
-  if (!entry || entry.err) { toast('That line has no result yet'); return; }
+  if (!hasVal(entry)) { toast('That line has no result yet'); return; }
   if (dependsOn(sheetId, lineId, p.currentSheetId, state.activeId)) {
     toast('That would create a circular reference');
     return;
   }
   const before = snapshot();
-  const line = activeLine();
+  const toks = curToks();
   ensureColorOn(src, lineId);
   const tok = { t: 'r', ref: lineId, sheet: sheetId };
   if (state.sel) {
-    line.tokens[state.sel.idx] = tok;
+    toks[state.sel.idx] = tok;
     state.caret = state.sel.idx + 1;
     state.sel = null;
   } else {
-    if (isValue(line.tokens[state.caret - 1])) insertToken({ t: 'o', v: '*' });
+    if (isValue(toks[state.caret - 1])) insertToken({ t: 'o', v: '*' });
     insertToken(tok);
   }
   commitHistory(before, null);
@@ -655,7 +830,7 @@ function insertCrossRef(sheetId, lineId) {
 // Literal tokens standing in for a result: number + unit token for a simple
 // unit, the SI magnitude for a compound one (no single unit token exists).
 function frozenTokensFor(r) {
-  if (!r || r.err) return [{ t: 'n', v: '0' }];
+  if (!hasVal(r)) return [{ t: 'n', v: '0' }];
   const syms = Object.entries(r.unit);
   if (!syms.length) return [{ t: 'n', v: plainNum(r.v) }];
   if (syms.length === 1 && syms[0][1] >= 1 && syms[0][1] <= 3) {
@@ -675,22 +850,23 @@ function removeLine(id) {
   const frozen = frozenTokensFor(results.get(id));
   for (const s of (p ? p.sheets : [])) {
     for (const line of s.lines) {
-      line.tokens = line.tokens.flatMap((t) =>
+      const fix = (toks) => toks.flatMap((t) =>
         t.t === 'r' && t.ref === id
           && ((t.sheet === undefined && s.id === cs.id) || t.sheet === cs.id)
           ? frozen.map((f) => ({ ...f }))
           : t);
+      if (line.kind === 'comp') for (const k of PART_KEYS) line.parts[k] = fix(line.parts[k]);
+      else line.tokens = fix(line.tokens);
     }
   }
   state.lines.splice(idx, 1);
   delete state.colors[id];
   if (!state.lines.length) state.lines.push({ id: state.nextId++, tokens: [] });
   if (state.activeId === id) {
-    const n = state.lines[Math.max(0, idx - 1)];
-    state.activeId = n.id;
-    state.caret = n.tokens.length;
+    state.activeId = state.lines[Math.max(0, idx - 1)].id;
+    caretToEnd();
   } else {
-    state.caret = Math.min(state.caret, activeLine().tokens.length);
+    state.caret = Math.min(state.caret, curToks().length);
   }
   state.sel = null;
 }
@@ -701,16 +877,26 @@ function moveLR(d) {
     state.sel = null;
     return;
   }
-  const len = activeLine().tokens.length;
-  state.caret = Math.max(0, Math.min(len, state.caret + d));
+  const l = activeLine();
+  const len = curToks().length;
+  const nc = state.caret + d;
+  // Walking off the end of a component part steps into the next part.
+  if (l && l.kind === 'comp' && (nc < 0 || nc > len)) {
+    const pi = PART_KEYS.indexOf(state.part) + d;
+    if (pi < 0 || pi >= PART_KEYS.length) return;
+    state.part = PART_KEYS[pi];
+    state.caret = d < 0 ? curToks().length : 0;
+    return;
+  }
+  state.caret = Math.max(0, Math.min(len, nc));
 }
 
 function moveUD(d) {
   const ni = activeIndex() + d;
   if (ni < 0 || ni >= state.lines.length) return;
   state.activeId = state.lines[ni].id;
-  state.caret = state.lines[ni].tokens.length;
   state.sel = null;
+  caretToEnd();
 }
 
 // Move the active line up/down one slot. Results never change — evaluation
@@ -739,6 +925,7 @@ function snapshot() {
     nextColor: state.nextColor,
     activeId: state.activeId,
     caret: state.caret,
+    part: state.part,
   };
 }
 
@@ -756,7 +943,8 @@ function restore(s) {
   state.activeId = state.lines.some((l) => l.id === s.activeId)
     ? s.activeId
     : state.lines[state.lines.length - 1].id;
-  state.caret = Math.min(s.caret, activeLine().tokens.length);
+  state.part = PART_KEYS.includes(s.part) ? s.part : 'w';
+  state.caret = Math.min(s.caret, curToks().length);
   state.sel = null;
   labelEditId = null;
   labelEditSnap = null;
@@ -888,7 +1076,7 @@ function adoptSheet(p, sheetId) {
   state.activeId = s.lines.some((l) => l.id === s.activeId)
     ? s.activeId
     : s.lines[s.lines.length - 1].id;
-  state.caret = activeLine().tokens.length;
+  caretToEnd();
   state.sel = null;
   const key = historyKey(p.id, s.id);
   let h = histories.get(key);
@@ -984,10 +1172,12 @@ function deleteSheet(sheetId) {
   for (const s of p.sheets) {
     if (s.id === sheetId) continue;
     for (const line of s.lines) {
-      line.tokens = line.tokens.flatMap((t) =>
+      const fix = (toks) => toks.flatMap((t) =>
         t.t === 'r' && t.sheet === sheetId
           ? frozenTokensFor(projResults.get(sheetId + ':' + t.ref)).map((f) => ({ ...f }))
           : t);
+      if (line.kind === 'comp') for (const k of PART_KEYS) line.parts[k] = fix(line.parts[k]);
+      else line.tokens = fix(line.tokens);
     }
   }
   p.sheets.splice(idx, 1);
@@ -1044,14 +1234,25 @@ function importProjectsFromData(d) {
     (t.t === 'p' && (t.v === '(' || t.v === ')')) ||
     (t.t === 'r' && typeof t.ref === 'number'));
   const cleanName = (raw, fallback) => String(raw || '').trim().slice(0, 24) || fallback;
+  const sanitizeParts = (raw) => {
+    const parts = {};
+    for (const k of PART_KEYS) {
+      parts[k] = Array.isArray(raw && raw[k]) ? raw[k].filter(okTok).map((t) => ({ ...t })) : [];
+    }
+    return parts;
+  };
 
   const sanitizeDoc = (src) => {
     if (!src || !Array.isArray(src.lines)) return null;
     const lines = src.lines
-      .filter((l) => l && typeof l.id === 'number' && Array.isArray(l.tokens))
+      .filter((l) => l && typeof l.id === 'number'
+        && (Array.isArray(l.tokens) || (l.kind === 'comp' && l.parts)))
       .map((l) => ({
         id: l.id,
-        tokens: l.tokens.filter(okTok).map((t) => ({ ...t })),
+        tokens: l.kind !== 'comp' && Array.isArray(l.tokens)
+          ? l.tokens.filter(okTok).map((t) => ({ ...t }))
+          : [],
+        ...(l.kind === 'comp' ? { kind: 'comp', parts: sanitizeParts(l.parts) } : {}),
         ...(l.label ? { label: String(l.label).slice(0, 24) } : {}),
       }));
     if (!lines.length) return null;
@@ -1093,9 +1294,11 @@ function importProjectsFromData(d) {
     // a sheet that didn't survive sanitization dangles (renders as "…").
     for (const sh of sheets) {
       for (const l of sh.lines) {
-        for (const t of l.tokens) {
-          if (t.t === 'r' && t.sheet !== undefined) {
-            t.sheet = sheetIdMap.has(t.sheet) ? sheetIdMap.get(t.sheet) : -1;
+        for (const stream of tokenStreams(l)) {
+          for (const t of stream) {
+            if (t.t === 'r' && t.sheet !== undefined) {
+              t.sheet = sheetIdMap.has(t.sheet) ? sheetIdMap.get(t.sheet) : -1;
+            }
           }
         }
       }
@@ -1118,16 +1321,24 @@ function importProjectsFromData(d) {
 }
 
 
+// Would this letter extend the unit token under the caret ("l" + "b" → lb)?
+function unitLetterExtends(ch) {
+  const prev = curToks()[state.caret - 1];
+  return !state.sel && !!prev && prev.t === 'u' && isUnitPrefix(prev.v + ch);
+}
+
 function press(key) {
   if (!activeLine()) {
     state.activeId = state.lines[state.lines.length - 1].id;
-    state.caret = activeLine().tokens.length;
+    caretToEnd();
   }
-  if (key === 'left' || key === 'right' || key === 'up' || key === 'down' || key === 'escape') {
+  if (key === 'left' || key === 'right' || key === 'up' || key === 'down'
+    || key === 'escape' || key === 'nextpart' || key === 'prevpart') {
     if (key === 'left') moveLR(-1);
     else if (key === 'right') moveLR(1);
     else if (key === 'up') moveUD(-1);
     else if (key === 'down') moveUD(1);
+    else if (key === 'nextpart' || key === 'prevpart') stepPart(key === 'nextpart' ? 1 : -1);
     else { deselect(); closeUnitPop(); closeRefPop(); }
     breakCoalescing();
     update();
@@ -1143,15 +1354,25 @@ function press(key) {
     kind = 'digit';
   }
   else if (/^[0-9.]$/.test(key)) { inputDigit(key); kind = 'digit'; }
-  else if (/^[a-z]$/.test(key)) { inputUnitLetter(key); kind = 'digit'; }
+  else if (/^[a-z]$/.test(key)) {
+    // "b" makes a blank — unless it's finishing a unit like "lb".
+    if (key === 'b' && !unitLetterExtends('b')) blankToggle();
+    else { inputUnitLetter(key); kind = 'digit'; }
+  }
   else if (key === '+' || key === '-' || key === '*' || key === '/') inputOp(key);
   else if (key === '%') inputPercent();
   else if (key === '(' || key === ')') inputParen(key);
   else if (key === 'backspace') { backspace(); kind = 'backspace'; }
-  else if (key === 'enter') newLine();
+  else if (key === 'blank') blankToggle();
+  else if (key === 'enter') {
+    const l = activeLine();
+    if (l.kind === 'comp' && state.part !== 'n') stepPart(1);
+    else newLine();
+  }
   else if (key === 'clear') {
     const l = activeLine();
-    l.tokens = [];
+    if (l.kind === 'comp') l.parts[state.part] = [];
+    else l.tokens = [];
     state.caret = 0;
     state.sel = null;
   }
@@ -1173,10 +1394,11 @@ function caretEl() {
 
 const OP_GLYPH = { '*': '×', '/': '÷', '-': '−', '+': '+', '%': '%' };
 
-function tokenEl(line, tok, i) {
+function tokenEl(line, tok, i, part) {
   const s = document.createElement('span');
   s.dataset.idx = i;
-  const selected = state.sel && line.id === state.activeId && state.sel.idx === i;
+  const selected = state.sel && line.id === state.activeId && state.sel.idx === i
+    && (line.kind !== 'comp' || part === state.part);
   if (tok.t === 'n') {
     s.className = 'tok num' + (selected ? ' selected' : '');
     s.textContent = fmtNum(tok.v);
@@ -1199,7 +1421,7 @@ function tokenEl(line, tok, i) {
       ? (p && p.sheets.find((x) => x.id === tok.sheet))
       : currentSheet();
     const r = projResults.get(refKeyOf(tok));
-    const valText = r && !r.err ? fmtVal(r) : '…';
+    const valText = hasVal(r) ? fmtVal(r) : '…';
     const srcLine = srcSheet && srcSheet.lines.find((l) => l.id === tok.ref);
     if (srcLine && srcLine.label) {
       const rl = document.createElement('span');
@@ -1232,7 +1454,7 @@ function render() {
   for (const line of state.lines) {
     const isActive = line.id === state.activeId;
     const el = document.createElement('div');
-    el.className = 'line' + (isActive ? ' active' : '');
+    el.className = 'line' + (isActive ? ' active' : '') + (line.kind === 'comp' ? ' comp' : '');
     el.dataset.id = line.id;
 
     const grip = document.createElement('button');
@@ -1242,13 +1464,50 @@ function render() {
     el.appendChild(grip);
 
     const toks = document.createElement('div');
-    toks.className = 'tokens';
-    line.tokens.forEach((tok, i) => {
-      if (isActive && !state.sel && state.caret === i) toks.appendChild(caretEl());
-      toks.appendChild(tokenEl(line, tok, i));
-    });
-    if (isActive && !state.sel && state.caret === line.tokens.length) {
-      toks.appendChild(caretEl());
+    if (line.kind === 'comp') {
+      toks.className = 'tokens comp';
+      PART_KEYS.forEach((k, pi) => {
+        if (pi) {
+          const sep = document.createElement('span');
+          sep.className = 'csep';
+          sep.textContent = '×';
+          toks.appendChild(sep);
+        }
+        const focus = isActive && state.part === k;
+        const f = document.createElement('span');
+        f.className = 'cfield' + (focus ? ' focus' : '');
+        f.dataset.part = k;
+        f.title = PART_LABELS[k];
+        const cap = document.createElement('span');
+        cap.className = 'cap';
+        cap.textContent = PART_LABELS[k];
+        f.appendChild(cap);
+        const body = document.createElement('span');
+        body.className = 'cbody';
+        const parts = line.parts[k];
+        parts.forEach((tok, i) => {
+          if (focus && !state.sel && state.caret === i) body.appendChild(caretEl());
+          body.appendChild(tokenEl(line, tok, i, k));
+        });
+        if (focus && !state.sel && state.caret === parts.length) body.appendChild(caretEl());
+        if (!parts.length && !focus) {
+          const ph = document.createElement('span');
+          ph.className = 'cph';
+          ph.textContent = '…';
+          body.appendChild(ph);
+        }
+        f.appendChild(body);
+        toks.appendChild(f);
+      });
+    } else {
+      toks.className = 'tokens';
+      line.tokens.forEach((tok, i) => {
+        if (isActive && !state.sel && state.caret === i) toks.appendChild(caretEl());
+        toks.appendChild(tokenEl(line, tok, i));
+      });
+      if (isActive && !state.sel && state.caret === line.tokens.length) {
+        toks.appendChild(caretEl());
+      }
     }
     el.appendChild(toks);
 
@@ -1271,7 +1530,30 @@ function render() {
       lb.title = 'Edit label';
       resEl.appendChild(lb);
     }
-    if (!r) {
+    if (line.kind === 'comp' && r && !r.err) {
+      // Resolved dimensions ("120 × 45 × 19 mm ×4"); muted while incomplete.
+      const s = fmtComp(r);
+      const complete = hasVal(r);
+      const ci = state.colors[line.id];
+      if (ci !== undefined && complete) {
+        resEl.classList.add('tinted');
+        resEl.style.setProperty('--c', PALETTE[ci]);
+      }
+      const val = document.createElement('span');
+      val.className = 'cdims' + (complete ? '' : ' pending');
+      val.textContent = s;
+      resEl.appendChild(val);
+      if (complete) {
+        resEl.title = 'Total volume ' + fmtVal(r) + ' — tap to use it';
+        const pf = prevFmt.get(line.id);
+        if (pf !== undefined && pf !== s && line.id !== state.activeId) {
+          resEl.classList.add('flash');
+        }
+        prevFmt.set(line.id, s);
+      } else {
+        prevFmt.delete(line.id);
+      }
+    } else if (!r) {
       if (!line.label && !editingLabel) resEl.style.visibility = 'hidden';
       prevFmt.delete(line.id);
     } else if (r.err) {
@@ -1328,7 +1610,8 @@ function render() {
   }
 
   hintEl.style.display =
-    state.lines.length === 1 && state.lines[0].tokens.length === 0 ? '' : 'none';
+    state.lines.length === 1 && !state.lines[0].kind && state.lines[0].tokens.length === 0
+      ? '' : 'none';
 
   undoBtn.disabled = !undoStack.length;
   redoBtn.disabled = !redoStack.length;
@@ -1536,9 +1819,9 @@ function renderSummary() {
       sl.textContent = l.label;
       const sv = document.createElement('span');
       sv.className = 'sv';
-      sv.textContent = entry ? (entry.err || fmtVal(entry)) : '…';
+      sv.textContent = fmtEntry(entry);
       const ci = s.colors[l.id];
-      if (ci !== undefined && entry && !entry.err) {
+      if (ci !== undefined && hasVal(entry)) {
         sv.style.color = PALETTE[ci];
         sv.style.fontWeight = '600';
       }
@@ -1566,7 +1849,7 @@ function applyRefHighlight() {
   linesEl.querySelectorAll('.hl').forEach((el) => el.classList.remove('hl'));
   let key = hoverRefId;
   if (key === null && state.sel) {
-    const tok = activeLine()?.tokens[state.sel.idx];
+    const tok = curToks()[state.sel.idx];
     if (tok && tok.t === 'r') key = refKeyOf(tok);
   }
   if (key === null) return;
@@ -1706,6 +1989,26 @@ linesEl.addEventListener('click', (e) => {
   breakCoalescing();
   state.activeId = id;
   state.sel = null;
+  if (line.kind === 'comp') {
+    const field = e.target.closest('.cfield');
+    if (field) {
+      state.part = field.dataset.part;
+      const parts = line.parts[state.part];
+      const tokEl = e.target.closest('.tok');
+      if (tokEl) {
+        const i = Number(tokEl.dataset.idx);
+        const tok = parts[i];
+        if (tok && (tok.t === 'n' || tok.t === 'r')) state.sel = { idx: i };
+        state.caret = i + 1;
+      } else {
+        state.caret = parts.length;
+      }
+    } else {
+      caretToEnd();
+    }
+    update();
+    return;
+  }
   const tokEl = e.target.closest('.tok');
   if (tokEl) {
     const i = Number(tokEl.dataset.idx);
@@ -1806,8 +2109,8 @@ function endDrag(commit) {
     const [line] = state.lines.splice(d.index, 1);
     state.lines.splice(d.target, 0, line);
     state.activeId = line.id;
-    state.caret = line.tokens.length;
     state.sel = null;
+    caretToEnd();
     commitHistory(before, null);
     update();
   }
@@ -1840,6 +2143,14 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'Tab') {
+    const l = activeLine();
+    if (l && l.kind === 'comp') {
+      e.preventDefault();
+      press(e.shiftKey ? 'prevpart' : 'nextpart');
+    }
+    return;
+  }
   const map = {
     Enter: 'enter', Backspace: 'backspace', Delete: 'backspace', Escape: 'escape',
     ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
@@ -1967,7 +2278,7 @@ function buildRefPop() {
       nm.textContent = l.label;
       const vv = document.createElement('span');
       vv.className = 'rv2';
-      vv.textContent = entry ? (entry.err || fmtVal(entry)) : '…';
+      vv.textContent = fmtEntry(entry);
       b.append(nm, vv);
       rows.appendChild(b);
     }
@@ -2073,6 +2384,7 @@ render();
 window.__bionicalc = {
   state,
   evaluateAll,
+  press,
   switchProject,
   switchSheet,
   newSheet,
