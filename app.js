@@ -761,6 +761,15 @@ function cycleGrain(id) {
   else line.grain = 'w';
   commitHistory(before, null);
   update();
+  // Say what the new setting means, with the actual dimension when known.
+  const entry = results.get(id);
+  const side = (k) => {
+    const e = entry && entry.comp && entry.comp[k];
+    return e ? ` — the ${fmtVal(e)} side` : '';
+  };
+  if (line.grain === 'w') toast('Grain runs along the width' + side('w'));
+  else if (line.grain === 'h') toast('Grain runs along the height' + side('h'));
+  else toast("Grain: don't care — layouts may rotate this piece");
 }
 
 function ensureColor(id) {
@@ -1472,6 +1481,60 @@ function planCuts(parts, stock, sawsIn) {
       else unplaced.push({ part: piece.ty.part });
     }
 
+    // Maximize the leftover: shrink each used panel to its content (plus
+    // the defensive margin, so an off-by-a-little break can't ruin the
+    // finished cut), let the LAST used panel absorb all remaining stock
+    // when that stays within capacity — no extra cut — and otherwise
+    // leave the remainder as one untouched, maximal offcut. Unused
+    // panels stop costing breakdown cuts.
+    const shrinkBreaks = (rec) => {
+      if (!rec.breaks.length) return;
+      const vertical = rec.breaks[0].axis === 'v';
+      const used = rec.panels.filter((P) => P.placed.length);
+      if (!used.length) return;
+      const total = vertical ? rec.W : rec.H;
+      const panels = [];
+      const breaks = [];
+      let pos = 0;
+      used.forEach((P, i) => {
+        const extent = vertical
+          ? Math.max(...P.shelves.map((s) => s.nextX))
+          : P.nextY;
+        const orig = vertical ? P.W : P.H;
+        const tight = Math.min(orig, Math.ceil((extent + saws.margin) * 1000 - EPS) / 1000);
+        const rest = total - pos;
+        const last = i === used.length - 1;
+        // The last panel keeps everything when that still fits the saw.
+        const fitsAll = last && cutTool(saws,
+          vertical ? rest : rec.W, vertical ? rec.H : rest) === 'table';
+        const span = fitsAll ? rest : tight;
+        panels.push({
+          ...P,
+          x0: vertical ? pos : 0,
+          y0: vertical ? 0 : pos,
+          W: vertical ? span : rec.W,
+          H: vertical ? rec.H : span,
+        });
+        if (!fitsAll && total - (pos + span) > saws.tkKerf + 1e-3) {
+          breaks.push(vertical
+            ? { axis: 'v', at: span, pos: pos + span, wpW: total - pos, wpH: rec.H, panel: panels.length }
+            : { axis: 'h', at: span, pos: pos + span, wpW: rec.W, wpH: total - pos, panel: panels.length });
+          pos += span + saws.tkKerf;
+        } else {
+          pos += span;
+        }
+      });
+      const left = total - pos;
+      if (left > 1e-3) {
+        panels.push(vertical
+          ? mkPanel(pos, 0, left, rec.H)
+          : mkPanel(0, pos, rec.W, left));
+      }
+      rec.panels = panels;
+      rec.breaks = breaks;
+    };
+    for (const rec of opened) shrinkBreaks(rec);
+
     // Aggregate a sheet-coordinate view (diagrams, external checks) on top
     // of the per-panel layout the cut list consumes.
     for (const rec of opened) {
@@ -1560,12 +1623,17 @@ function planCuts(parts, stock, sawsIn) {
           risky += c.risky;
           track += c.track;
         }
+        // Prefer plans whose single biggest offcut is as large as possible;
+        // packed height only breaks remaining ties.
+        const maxOff = plan.sheets.reduce((a, rec) =>
+          sheetYield(rec).offcuts.reduce((b, o) => Math.max(b, o.w * o.h), a), 0);
         const key = [
           plan.unplaced.length,
           plan.sheets.length,
           risky,
           track,
           cuts,
+          -maxOff,
           plan.sheets.reduce((a, rec) => a + rec.panels.reduce((b, P) => b + P.nextY, 0), 0),
         ];
         if (!best || cmp(key, bestKey) < 0) {
@@ -2161,7 +2229,10 @@ function render() {
         f.title = PART_LABELS[k];
         const cap = document.createElement('span');
         cap.className = 'cap';
-        cap.textContent = PART_LABELS[k];
+        // The grain arrow rides on the dimension it follows.
+        cap.textContent = PART_LABELS[k]
+          + (line.grain === 'w' && k === 'w' ? ' ↔'
+            : line.grain === 'h' && k === 'h' ? ' ↕' : '');
         f.appendChild(cap);
         const body = document.createElement('span');
         body.className = 'cbody';
@@ -2193,11 +2264,14 @@ function render() {
       });
       const gb = document.createElement('button');
       gb.className = 'grainbtn' + (line.grain ? ' set' : '');
-      gb.textContent = line.grain === 'w' ? '↔' : line.grain === 'h' ? '↕' : 'grain';
-      gb.title = 'Grain '
-        + (line.grain === 'w' ? 'along the width'
-          : line.grain === 'h' ? 'along the height' : "— don't care")
-        + ' · tap to change';
+      gb.textContent = line.grain === 'w' ? '↔ width'
+        : line.grain === 'h' ? '↕ height' : 'grain';
+      gb.title = (line.grain === 'w'
+        ? 'Grain runs along the width — cut layouts only rotate this piece to follow the stock’s grain.'
+        : line.grain === 'h'
+          ? 'Grain runs along the height — cut layouts only rotate this piece to follow the stock’s grain.'
+          : 'Grain direction: don’t care — cut layouts may rotate this piece freely.')
+        + ' Tap to change.';
       toks.appendChild(gb);
     } else {
       toks.className = 'tokens';

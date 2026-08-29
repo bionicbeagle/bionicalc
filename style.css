@@ -786,10 +786,8 @@ main {
   border-style: solid;
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
   color: var(--accent);
-  font-size: 15px;
+  font-size: 11px;
   font-weight: 600;
-  line-height: 1.25;
-  padding: 1px 9px;
 }
 
 .cutsvg .cuttext,

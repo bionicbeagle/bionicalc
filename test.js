@@ -783,7 +783,7 @@ check('cabinet example: pairs in uniform strips',
       return { cuts: plan.cuts, strips: [...new Set(pl.map(p => Math.round(p.y * 1000)))].length,
                strip1: pl.filter(p => p.y === 0).map(p => Math.round(p.w * 1000)).join(','),
                strip2: pl.filter(p => p.y > 0).map(p => Math.round(p.w * 1000)).join(',') }; })()`),
-  { cuts: 6, strips: 2, strip1: '900,900', strip2: '600,600' });
+  { cuts: 6, strips: 2, strip1: '900,900,580', strip2: '580' });
 
 // 69c. cutList: rips first, grouped crosscuts, steps sum to the cut count
 check('cabinet cut list: 2 rips then 2 grouped crosscut steps',
@@ -791,7 +791,7 @@ check('cabinet cut list: 2 rips then 2 grouped crosscut steps',
       const steps = cutList(plan.sheets[0]);
       return { seq: steps.map(s => s.kind + '@' + Math.round(s.at * 1000) + 'x' + s.count),
                total: steps.reduce((a, s) => a + s.count, 0), cuts: plan.cuts }; })()`),
-  { seq: ['rip@600x1', 'rip@580x1', 'cross@900x2', 'cross@600x2'], total: 6, cuts: 6 });
+  { seq: ['rip@600x1', 'rip@600x1', 'cross@900x2', 'cross@580x1', 'cross@580x1'], total: 6, cuts: 6 });
 
 // 69d. cutList: trims listed after their strip's crosscuts
 check('cut list includes trims',
@@ -807,8 +807,8 @@ check('cabinet yield: parts and three offcuts, kerf deducted',
       const y = sheetYield(plan.sheets[0], 0.003);
       return { parts: y.parts.map(p => [Math.round(p.w * 1000), Math.round(p.h * 1000), p.count]),
                offcuts: y.offcuts.map(o => [Math.round(o.w * 1000), Math.round(o.h * 1000)]) }; })()`),
-  { parts: [[900, 600, 2], [600, 580, 2]],
-    offcuts: [[1234, 580], [634, 600], [2440, 34]] });
+  { parts: [[900, 600, 2], [580, 600, 2]],
+    offcuts: [[1857, 600], [2440, 14], [51, 600]] });
 check('trim-case yield includes the trim cutoff',
   t(`(() => { ${P} const plan = planCuts([P(0.3,0.2,1), P(0.25,0.1,1)], [P(0.6,0.2,1)], 0);
       const y = sheetYield(plan.sheets[0], 0);
@@ -911,7 +911,7 @@ check('two-saw cabinet: one tracksaw break, then all table saw',
                seq: steps.map(s => (s.tool === 'track' ? 'tk-' : '') + s.kind + '@' + Math.round(s.at * 1000) + 'x' + s.count),
                total: steps.reduce((a, s) => a + s.count, 0) }; })()`),
   { cuts: 7, risky: 0, trackOps: 1,
-    seq: ['tk-break@609x1', 'rip@600x1', 'cross@900x2', 'cross@580x1', 'rip@580x1', 'cross@600x1'],
+    seq: ['tk-break@609x1', 'rip@600x1', 'cross@900x2', 'cross@580x1', 'rip@600x1', 'cross@580x1'],
     total: 7 });
 
 // 79b. Steps carry the workpiece they cut into, for the schematics
@@ -919,7 +919,7 @@ check('steps track the shrinking workpiece',
   t(`(() => { ${P} ${SAWS} const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], SAWS);
       return cutList(plan.sheets[0]).map(s =>
         s.dir + Math.round(s.wpW * 1000) + 'x' + Math.round(s.wpH * 1000)); })()`),
-  ['h2440x1220', 'h2440x609', 'v2440x600', 'v634x600', 'h2440x609', 'v2440x580']);
+  ['h2440x1220', 'h2440x609', 'v2440x600', 'v634x600', 'h2440x609', 'v2440x600']);
 
 // 79c. Half-sheet table saw: ONE tracksaw crosscut across the length
 // yields two panels, then everything runs on the table saw
@@ -930,7 +930,20 @@ check('half-sheet capacity: one breakdown crosscut, rest table saw',
       return { trackOps: plan.trackOps, risky: plan.risky,
                break1: steps[0].kind + '-' + steps[0].dir + '@' + Math.round(steps[0].at * 1000),
                restAllTable: steps.slice(1).every(s => s.tool !== 'track') }; })()`),
-  { trackOps: 1, risky: 0, break1: 'break-v@1219', restAllTable: true });
+  { trackOps: 1, risky: 0, break1: 'break-v@1216', restAllTable: true });
+
+// 79e. A lightly-used sheet: the break hugs the content so the offcut is
+// as large as possible, and an untouched panel costs no cut at all
+check('small part leaves one maximal offcut',
+  t(`(() => { ${P} const saws = { kerf: 0.003, tkKerf: 0.0022, margin: 0.01, capW: 1.25, capH: 1.25 };
+      const plan = planCuts([P(0.58,0.9,1,'w')], [P(2.44,1.22,1)], saws);
+      const steps = cutList(plan.sheets[0]);
+      const y = sheetYield(plan.sheets[0]);
+      return { cuts: plan.cuts, trackOps: plan.trackOps,
+               break1: Math.round(steps[0].at * 1000),
+               offcuts: y.offcuts.map(o => [Math.round(o.w * 1000), Math.round(o.h * 1000)]) }; })()`),
+  { cuts: 3, trackOps: 1, break1: 593,
+    offcuts: [[1845, 1220], [593, 317], [10, 900]] });
 
 // 79d. Many thin strips: one breakdown beats repeated tracksaw rips
 check('strip stack: single break instead of two tracksaw rips',
@@ -946,7 +959,7 @@ check('two-saw yield: margin eats into the bottom remainder',
   t(`(() => { ${P} ${SAWS} const plan = planCuts([P(0.6,0.9,2), P(0.58,0.6,2)], [P(2.44,1.22,1)], SAWS);
       const y = sheetYield(plan.sheets[0]);
       return y.offcuts.map(o => [Math.round(o.w * 1000), Math.round(o.h * 1000)]); })()`),
-  [[1837, 580], [2440, 26], [51, 600], [2440, 6]]);
+  [[1857, 600], [51, 600], [2440, 6], [2440, 6]]);
 
 // 81. A piece over capacity itself: tracksaw-finished edges, flagged risky
 check('over-capacity piece flags risky tracksaw edges',
