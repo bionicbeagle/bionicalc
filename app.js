@@ -73,8 +73,9 @@ const state = {
   nextColor: 0,
 };
 
-let results = new Map();  // lineId -> { v } | { err } | null (empty line)
-let prevFmt = new Map();  // lineId -> last displayed result, to flash changes
+let results = new Map();     // current sheet: lineId -> { v } | { err } | null
+let projResults = new Map(); // whole project: "sheetId:lineId" -> same entries
+let prevFmt = new Map();     // lineId -> last displayed result, to flash changes
 
 /*
  * Projects and sheets: a project (tabs above the keypad) holds one or more
@@ -248,7 +249,7 @@ function parseTokens(tokens, resolve) {
     }
     if (tok.t === 'r') {
       i++;
-      const r = resolve(tok.ref);
+      const r = resolve(tok);
       if (!r || r.err) fail();
       return { si: r.si, dim: r.dim, unit: r.unit };
     }
@@ -267,26 +268,38 @@ function parseTokens(tokens, resolve) {
   return v;
 }
 
-// Lines are evaluated as a dependency graph, not in document order: each
-// line's references are resolved recursively (memoized), so reordering lines
-// never changes any result. A cycle — impossible through the UI, but possible
-// via hand-edited storage — bottoms out as an error instead of recursing.
+// The whole PROJECT is evaluated as one dependency graph, not in document
+// order: references resolve recursively (memoized), within a sheet by line
+// id and across sheets via {sheet, ref} tokens. Reordering lines or sheets
+// never changes any result, and editing a "master" sheet's parameter updates
+// every sheet that references it. A cycle — impossible through the UI, but
+// possible via hand-edited storage — bottoms out as an error.
 function evaluateAll() {
-  const res = new Map();
+  syncCurrentSheet();
+  const p = currentProject();
+  const sheets = p ? p.sheets : [];
+  projResults = new Map();
   const visiting = new Set();
 
-  function evalLine(id) {
-    if (res.has(id)) return res.get(id);
-    if (visiting.has(id)) return { err: '—' };
-    const line = state.lines.find((l) => l.id === id);
+  const lineOf = (sid, lid) => {
+    const s = sheets.find((x) => x.id === sid);
+    return s && s.lines.find((l) => l.id === lid);
+  };
+
+  function evalLine(sid, lid) {
+    const key = sid + ':' + lid;
+    if (projResults.has(key)) return projResults.get(key);
+    if (visiting.has(key)) return { err: '—' };
+    const line = lineOf(sid, lid);
     if (!line) return { err: '—' };
-    visiting.add(id);
+    visiting.add(key);
     let r;
     const t = cleanTokens(line.tokens);
     if (!t.length) r = null;
     else {
       try {
-        const V = parseTokens(t, evalLine);
+        const V = parseTokens(t, (tok) =>
+          evalLine(tok.sheet !== undefined ? tok.sheet : sid, tok.ref));
         // r.v is the magnitude in the display unit (equals si when unitless).
         r = isFinite(V.si)
           ? { v: V.si / unitFactor(V.unit), si: V.si, dim: V.dim, unit: V.unit }
@@ -295,27 +308,42 @@ function evaluateAll() {
         r = { err: e === UNIT_ERR ? 'unit error' : '—' };
       }
     }
-    visiting.delete(id);
-    res.set(id, r);
+    visiting.delete(key);
+    projResults.set(key, r);
     return r;
   }
 
-  for (const line of state.lines) evalLine(line.id);
-  return res;
+  for (const s of sheets) for (const l of s.lines) evalLine(s.id, l.id);
+
+  // The current sheet's view, keyed by plain line id — what render, tests,
+  // and same-sheet operations consume.
+  const view = new Map();
+  const csId = p ? p.currentSheetId : null;
+  for (const l of state.lines) {
+    const r = projResults.get(csId + ':' + l.id);
+    view.set(l.id, r === undefined ? null : r);
+  }
+  return view;
 }
 
-// Does line `aId` (transitively) depend on line `bId`? Used to refuse
-// reference insertions that would close a cycle.
-function dependsOn(aId, bId) {
+// Does line (aSheetId, aLineId) transitively depend on line (bSheetId,
+// bLineId)? Used to refuse reference insertions that would close a cycle,
+// across sheets included.
+function dependsOn(aSheetId, aLineId, bSheetId, bLineId) {
+  const p = currentProject();
+  if (!p) return false;
   const seen = new Set();
-  const walk = (id) => {
-    if (id === bId) return true;
-    if (seen.has(id)) return false;
-    seen.add(id);
-    const line = state.lines.find((l) => l.id === id);
-    return !!line && line.tokens.some((t) => t.t === 'r' && walk(t.ref));
+  const walk = (sid, lid) => {
+    if (sid === bSheetId && lid === bLineId) return true;
+    const key = sid + ':' + lid;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    const s = p.sheets.find((x) => x.id === sid);
+    const line = s && s.lines.find((l) => l.id === lid);
+    return !!line && line.tokens.some((t) =>
+      t.t === 'r' && walk(t.sheet !== undefined ? t.sheet : sid, t.ref));
   };
-  return walk(aId);
+  return walk(aSheetId, aLineId);
 }
 
 /* ================= formatting ================= */
@@ -530,8 +558,9 @@ function autoRef() {
 }
 
 function insertRefFrom(srcId) {
+  const csId = currentProject().currentSheetId;
   if (srcId === state.activeId) { toast("A calculation can't use its own result"); return; }
-  if (dependsOn(srcId, state.activeId)) { toast('That would create a circular reference'); return; }
+  if (dependsOn(csId, srcId, csId, state.activeId)) { toast('That would create a circular reference'); return; }
   const r = results.get(srcId);
   if (!r || r.err) { toast('That line has no result yet'); return; }
 
@@ -554,24 +583,73 @@ function plainNum(v) {
   return String(Number(v.toPrecision(12)));
 }
 
+function ensureColorOn(sheet, lineId) {
+  const cs = currentSheet();
+  if (cs && sheet.id === cs.id) {
+    ensureColor(lineId);
+    return;
+  }
+  if (sheet.colors[lineId] === undefined) {
+    sheet.colors[lineId] = sheet.nextColor++ % PALETTE.length;
+  }
+}
+
+// Insert a live reference to a line on ANOTHER sheet of this project.
+function insertCrossRef(sheetId, lineId) {
+  const p = currentProject();
+  const src = p && p.sheets.find((s) => s.id === sheetId);
+  if (!src) return;
+  if (sheetId === p.currentSheetId) { insertRefFrom(lineId); return; }
+  const entry = projResults.get(sheetId + ':' + lineId);
+  if (!entry || entry.err) { toast('That line has no result yet'); return; }
+  if (dependsOn(sheetId, lineId, p.currentSheetId, state.activeId)) {
+    toast('That would create a circular reference');
+    return;
+  }
+  const before = snapshot();
+  const line = activeLine();
+  ensureColorOn(src, lineId);
+  const tok = { t: 'r', ref: lineId, sheet: sheetId };
+  if (state.sel) {
+    line.tokens[state.sel.idx] = tok;
+    state.caret = state.sel.idx + 1;
+    state.sel = null;
+  } else {
+    if (isValue(line.tokens[state.caret - 1])) insertToken({ t: 'o', v: '*' });
+    insertToken(tok);
+  }
+  commitHistory(before, null);
+  update();
+}
+
+// Literal tokens standing in for a result: number + unit token for a simple
+// unit, the SI magnitude for a compound one (no single unit token exists).
+function frozenTokensFor(r) {
+  if (!r || r.err) return [{ t: 'n', v: '0' }];
+  const syms = Object.entries(r.unit);
+  if (!syms.length) return [{ t: 'n', v: plainNum(r.v) }];
+  if (syms.length === 1 && syms[0][1] === 1) {
+    return [{ t: 'n', v: plainNum(r.v) }, { t: 'u', v: syms[0][0] }];
+  }
+  return [{ t: 'n', v: plainNum(r.si) }];
+}
+
 function removeLine(id) {
   const idx = state.lines.findIndex((l) => l.id === id);
   if (idx < 0) return;
-  // Freeze references to this line into literal tokens so dependents keep
-  // working: number + unit token for a simple unit, the SI magnitude for a
-  // compound one (which has no single unit token to freeze into).
-  const r = results.get(id);
-  let frozen = [{ t: 'n', v: '0' }];
-  if (r && !r.err) {
-    const syms = Object.entries(r.unit);
-    if (!syms.length) frozen = [{ t: 'n', v: plainNum(r.v) }];
-    else if (syms.length === 1 && syms[0][1] === 1) {
-      frozen = [{ t: 'n', v: plainNum(r.v) }, { t: 'u', v: syms[0][0] }];
-    } else frozen = [{ t: 'n', v: plainNum(r.si) }];
-  }
-  for (const line of state.lines) {
-    line.tokens = line.tokens.flatMap((t) =>
-      t.t === 'r' && t.ref === id ? frozen.map((f) => ({ ...f })) : t);
+  // Freeze references to this line — in this sheet and in any other sheet of
+  // the project that references it — so dependents keep working.
+  const p = currentProject();
+  const cs = currentSheet();
+  const frozen = frozenTokensFor(results.get(id));
+  for (const s of (p ? p.sheets : [])) {
+    for (const line of s.lines) {
+      line.tokens = line.tokens.flatMap((t) =>
+        t.t === 'r' && t.ref === id
+          && ((t.sheet === undefined && s.id === cs.id) || t.sheet === cs.id)
+          ? frozen.map((f) => ({ ...f }))
+          : t);
+    }
   }
   state.lines.splice(idx, 1);
   delete state.colors[id];
@@ -796,6 +874,7 @@ function adoptSheet(p, sheetId) {
   labelEditSnap = null;
   projectBar.cancelRename();
   sheetBar.cancelRename();
+  closeRefPop();
 }
 
 function adoptProject(id) {
@@ -869,6 +948,17 @@ function deleteSheet(sheetId) {
   if (!p) return;
   const idx = p.sheets.findIndex((s) => s.id === sheetId);
   if (idx < 0) return;
+  // Freeze every cross-sheet reference into the doomed sheet.
+  syncCurrentSheet();
+  for (const s of p.sheets) {
+    if (s.id === sheetId) continue;
+    for (const line of s.lines) {
+      line.tokens = line.tokens.flatMap((t) =>
+        t.t === 'r' && t.sheet === sheetId
+          ? frozenTokensFor(projResults.get(sheetId + ':' + t.ref)).map((f) => ({ ...f }))
+          : t);
+    }
+  }
   p.sheets.splice(idx, 1);
   histories.delete(historyKey(p.id, sheetId));
   if (!p.sheets.length) p.sheets.push(freshSheet(p));
@@ -958,14 +1048,27 @@ function importProjectsFromData(d) {
       ? p.sheets
       : [{ lines: p.lines, activeId: p.activeId, colors: p.colors, nextId: p.nextId, nextColor: p.nextColor }];
     const sheets = [];
+    const sheetIdMap = new Map(); // original sheet id -> renumbered id
     let sheetId = 1;
     for (const s of srcSheets) {
       const doc = sanitizeDoc(s);
       if (!doc) continue;
       const sid = sheetId++;
+      if (s && s.id !== undefined) sheetIdMap.set(s.id, sid);
       sheets.push({ id: sid, name: cleanName(s && s.name, 'Sheet ' + sid), ...doc });
     }
     if (!sheets.length) continue;
+    // Re-point cross-sheet references at the renumbered sheet ids; a ref into
+    // a sheet that didn't survive sanitization dangles (renders as "…").
+    for (const sh of sheets) {
+      for (const l of sh.lines) {
+        for (const t of l.tokens) {
+          if (t.t === 'r' && t.sheet !== undefined) {
+            t.sheet = sheetIdMap.has(t.sheet) ? sheetIdMap.get(t.sheet) : -1;
+          }
+        }
+      }
+    }
     added.push({
       id: nextProjectId++,
       name: cleanName(p.name, 'Imported'),
@@ -994,7 +1097,7 @@ function press(key) {
     else if (key === 'right') moveLR(1);
     else if (key === 'up') moveUD(-1);
     else if (key === 'down') moveUD(1);
-    else { deselect(); closeUnitPop(); }
+    else { deselect(); closeUnitPop(); closeRefPop(); }
     breakCoalescing();
     update();
     return;
@@ -1057,25 +1160,35 @@ function tokenEl(line, tok, i) {
     s.className = 'tok unit';
     s.textContent = tok.v;
   } else if (tok.t === 'r') {
-    s.className = 'tok ref' + (selected ? ' selected' : '');
-    s.dataset.ref = tok.ref;
-    const r = results.get(tok.ref);
+    const cross = tok.sheet !== undefined;
+    s.className = 'tok ref' + (cross ? ' xchip' : '') + (selected ? ' selected' : '');
+    s.dataset.ref = refKeyOf(tok);
+    const p = currentProject();
+    const srcSheet = cross
+      ? (p && p.sheets.find((x) => x.id === tok.sheet))
+      : currentSheet();
+    const r = projResults.get(refKeyOf(tok));
     const valText = r && !r.err ? fmtVal(r) : '…';
-    const src = state.lines.find((l) => l.id === tok.ref);
-    if (src && src.label) {
+    const srcLine = srcSheet && srcSheet.lines.find((l) => l.id === tok.ref);
+    if (srcLine && srcLine.label) {
       const rl = document.createElement('span');
       rl.className = 'rl';
-      rl.textContent = src.label;
+      rl.textContent = srcLine.label;
       const rv = document.createElement('span');
       rv.className = 'rv';
       rv.textContent = valText;
       s.append(rl, rv);
-      s.title = `${src.label} = ${valText}`;
+      s.title = cross && srcSheet
+        ? `${srcLine.label} on ${srcSheet.name} = ${valText}`
+        : `${srcLine.label} = ${valText}`;
     } else {
       s.textContent = valText;
-      s.title = 'Live value from another line';
+      s.title = cross && srcSheet
+        ? `Live value from ${srcSheet.name}`
+        : 'Live value from another line';
     }
-    const ci = state.colors[tok.ref];
+    const colors = srcSheet ? srcSheet.colors : state.colors;
+    const ci = colors ? colors[tok.ref] : undefined;
     if (ci !== undefined) s.style.setProperty('--c', PALETTE[ci]);
   }
   return s;
@@ -1367,7 +1480,13 @@ const sheetBar = makeTabBar(document.getElementById('sheettabs'), {
 
 /* ---- hover: light up a result and every reference to it ---- */
 
-let hoverRefId = null;
+let hoverRefId = null; // "sheetId:lineId", matching chips' data-ref
+
+function refKeyOf(tok) {
+  const p = currentProject();
+  const sid = tok.sheet !== undefined ? tok.sheet : (p ? p.currentSheetId : 0);
+  return sid + ':' + tok.ref;
+}
 
 // Re-applied after every render so the highlight survives re-renders while
 // the pointer rests on a chip or result. Without a hover (touch devices),
@@ -1375,17 +1494,21 @@ let hoverRefId = null;
 // by tapping the chip, the same gesture that selects it.
 function applyRefHighlight() {
   linesEl.querySelectorAll('.hl').forEach((el) => el.classList.remove('hl'));
-  let id = hoverRefId;
-  if (id === null && state.sel) {
+  let key = hoverRefId;
+  if (key === null && state.sel) {
     const tok = activeLine()?.tokens[state.sel.idx];
-    if (tok && tok.t === 'r') id = tok.ref;
+    if (tok && tok.t === 'r') key = refKeyOf(tok);
   }
-  if (id === null) return;
-  const chips = linesEl.querySelectorAll(`.tok.ref[data-ref="${id}"]`);
+  if (key === null) return;
+  const chips = linesEl.querySelectorAll(`.tok.ref[data-ref="${key}"]`);
   if (!chips.length) return; // an unreferenced result has nothing to connect
   chips.forEach((el) => el.classList.add('hl'));
-  const src = linesEl.querySelector(`.line[data-id="${id}"] .result`);
-  if (src) src.classList.add('hl');
+  const p = currentProject();
+  const [sid, lid] = key.split(':');
+  if (p && Number(sid) === p.currentSheetId) {
+    const src = linesEl.querySelector(`.line[data-id="${lid}"] .result`);
+    if (src) src.classList.add('hl');
+  }
 }
 
 function setRefHighlight(id) {
@@ -1527,9 +1650,13 @@ linesEl.addEventListener('click', (e) => {
 
 linesEl.addEventListener('mouseover', (e) => {
   const chip = e.target.closest('.tok.ref');
-  if (chip) { setRefHighlight(Number(chip.dataset.ref)); return; }
+  if (chip) { setRefHighlight(chip.dataset.ref); return; }
   const resEl = e.target.closest('.result');
-  if (resEl) { setRefHighlight(Number(resEl.closest('.line').dataset.id)); return; }
+  if (resEl) {
+    const p = currentProject();
+    setRefHighlight(p ? p.currentSheetId + ':' + resEl.closest('.line').dataset.id : null);
+    return;
+  }
   setRefHighlight(null);
 });
 linesEl.addEventListener('mouseleave', () => setRefHighlight(null));
@@ -1718,9 +1845,83 @@ document.getElementById('more-units').addEventListener('click', () => {
 });
 
 
+/* ---- cross-sheet reference picker ---- */
+
+const refPop = document.getElementById('refpop');
+
+function closeRefPop() {
+  refPop.hidden = true;
+}
+
+// Rebuilt on every open: lists the LABELED results of every other sheet in
+// the current project, grouped by sheet.
+function buildRefPop() {
+  refPop.textContent = '';
+  const p = currentProject();
+  let any = false;
+  for (const s of (p ? p.sheets : [])) {
+    if (s.id === p.currentSheetId) continue;
+    const labeled = s.lines.filter((l) => l.label);
+    if (!labeled.length) continue;
+    any = true;
+    const g = document.createElement('div');
+    g.className = 'ugroup';
+    const h = document.createElement('h3');
+    h.textContent = s.name;
+    g.appendChild(h);
+    const rows = document.createElement('div');
+    rows.className = 'refrows';
+    for (const l of labeled) {
+      const entry = projResults.get(s.id + ':' + l.id);
+      const b = document.createElement('button');
+      b.className = 'refrow';
+      b.dataset.sheet = s.id;
+      b.dataset.line = l.id;
+      const nm = document.createElement('span');
+      nm.className = 'rn';
+      nm.textContent = l.label;
+      const vv = document.createElement('span');
+      vv.className = 'rv2';
+      vv.textContent = entry ? (entry.err || fmtVal(entry)) : '…';
+      b.append(nm, vv);
+      rows.appendChild(b);
+    }
+    g.appendChild(rows);
+    refPop.appendChild(g);
+  }
+  if (!any) {
+    const msg = document.createElement('p');
+    msg.className = 'refempty';
+    msg.textContent = 'Label a line on another sheet, then insert its live value here.';
+    refPop.appendChild(msg);
+  }
+}
+
+document.getElementById('refbtn').addEventListener('click', () => {
+  if (refPop.hidden) {
+    closeUnitPop();
+    buildRefPop();
+    refPop.hidden = false;
+  } else {
+    closeRefPop();
+  }
+});
+
+refPop.addEventListener('click', (e) => {
+  const row = e.target.closest('.refrow');
+  if (!row) return;
+  closeRefPop();
+  insertCrossRef(Number(row.dataset.sheet), Number(row.dataset.line));
+});
+
 window.addEventListener('pointerdown', (e) => {
-  if (unitPop.hidden || !e.target.closest) return;
-  if (!e.target.closest('#unitpop') && !e.target.closest('#more-units')) closeUnitPop();
+  if (!e.target.closest) return;
+  if (!unitPop.hidden && !e.target.closest('#unitpop') && !e.target.closest('#more-units')) {
+    closeUnitPop();
+  }
+  if (!refPop.hidden && !e.target.closest('#refpop') && !e.target.closest('#refbtn')) {
+    closeRefPop();
+  }
 });
 
 const undoBtn = document.getElementById('undo');

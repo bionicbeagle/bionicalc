@@ -25,6 +25,12 @@ Calculations form a flowing document instead of a single display:
   sheet is its own page with its own undo history. Both tab bars work the same way: tap
   to switch, tap the active tab to rename it, `+` to create, and the active tab's `×`
   (tap twice) to delete. Older storage formats migrate automatically.
+- **Cross-sheet references.** Keep top-level parameters on a master sheet (label them:
+  "width", "height"), then use the `ref` key next to "new line" on any other sheet — it
+  lists every labeled result from the project's other sheets; tap one to insert it as a
+  live chip (dashed outline). Editing the master updates every sheet that uses it. The
+  whole project evaluates as one dependency graph, cycles are refused across sheets,
+  and deleting a referenced line or sheet freezes its values into its dependents.
 - **Export / import.** Export downloads every project as a JSON file (backup, or moving
   work between devices); import adds a file's projects as new tabs and never overwrites
   what's already there.

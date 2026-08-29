@@ -466,4 +466,56 @@ check('first imported sheet adopted', res(0), 3);
 t('switchSheet(currentProject().sheets[1].id)');
 check('second imported sheet evaluates', res(0), 4);
 
+// 43. Cross-sheet references: a master sheet's parameters drive detail sheets
+t('newProject()');
+t('renameSheet(currentProject().currentSheetId, "Master")');
+keys(['6', '0', '0', 'm', 'm']);
+t('startLabelEdit(state.activeId); commitLabel(state.activeId, "width")');
+const masterSheetId = t('currentProject().sheets[0].id');
+const widthLineId = t('currentProject().sheets[0].lines[0].id');
+t('newSheet()');
+t(`insertCrossRef(${masterSheetId}, ${widthLineId})`);
+keys(['/', '2']);
+check('cross-sheet ref evaluates', lastVal(), '300 mm');
+
+// editing the master updates the detail sheet
+t(`switchSheet(${masterSheetId})`);
+t('state.sel = { idx: 0 };');
+keys(['8', '0', '0']);
+check('master edited', lastVal(), '800 mm');
+t('switchSheet(currentProject().sheets[1].id)');
+check('detail follows the master', lastVal(), '400 mm');
+
+// 44. Cycles across sheets are rejected
+t('startLabelEdit(state.activeId); commitLabel(state.activeId, "half")');
+const detailSheetId = t('currentProject().currentSheetId');
+const detailLineId = t('state.activeId');
+t(`switchSheet(${masterSheetId})`);
+t('state.activeId = state.lines[0].id; state.caret = state.lines[0].tokens.length; state.sel = null;');
+t(`insertCrossRef(${detailSheetId}, ${detailLineId})`);
+check('cross-sheet cycle rejected', t('state.lines[0].tokens.length'), 2);
+
+// 45. Deleting a sheet freezes cross-references into it
+t(`switchSheet(${detailSheetId})`);
+t(`deleteSheet(${masterSheetId})`);
+check('cross ref frozen on sheet delete', lastVal(), '400 mm');
+check('frozen to number + unit', t('state.lines[0].tokens.slice(0, 2).map(x => x.t).join("")'), 'nu');
+
+// 46. Export/import round-trips cross-sheet references (sheet ids remapped)
+t('newProject()');
+t('renameSheet(currentProject().currentSheetId, "M2")');
+keys(['5', '0']);
+t('startLabelEdit(state.activeId); commitLabel(state.activeId, "param")');
+const m2Sheet = t('currentProject().currentSheetId');
+const m2Line = t('state.activeId');
+t('newSheet()');
+t(`insertCrossRef(${m2Sheet}, ${m2Line})`);
+keys(['*', '3']);
+check('setup: [param] × 3', lastVal(), '150');
+const roundTrip = t('JSON.stringify({ projects: [JSON.parse(JSON.stringify(currentProject()))] })');
+check('re-import of exported project', t(`importProjectsFromData(${roundTrip})`), 1);
+t('switchSheet(currentProject().sheets[1].id)');
+check('cross ref survives import remap', lastVal(), '150');
+check('imported chip still cross-sheet', t('state.lines[0].tokens[0].sheet'), 1);
+
 process.exit(failures ? 1 : 0);

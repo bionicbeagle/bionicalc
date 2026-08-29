@@ -45,7 +45,9 @@
       A unit after a reference converts it.<br><br>
       The tabs above the keypad are <b>projects</b>; the tabs up here are <b>sheets</b>
       within the current project (drawers, carcase, …) — every sheet is its own page
-      with its own undo. Tap the active tab to rename it.
+      with its own undo. Tap the active tab to rename it.<br><br>
+      Keep master parameters on one sheet and <b>label</b> them — the <b>ref</b> key
+      lists every labeled result from the other sheets, ready to insert as a live value.
     </p>
   </section>
 
@@ -84,8 +86,12 @@
       <button class="key ukey" data-key="unit:in">in</button>
       <button class="key ukey" id="more-units" title="All units">…</button>
     </div>
-    <button id="newline" class="key" data-key="enter">new line&ensp;⏎</button>
+    <div id="padrow">
+      <button id="refbtn" class="key fn" title="Insert a value from another sheet">ref</button>
+      <button id="newline" class="key" data-key="enter">new line&ensp;⏎</button>
+    </div>
     <div id="unitpop" hidden></div>
+    <div id="refpop" hidden></div>
   </aside>
 </main>
 

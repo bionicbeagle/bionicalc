@@ -580,6 +580,17 @@ main {
   color: var(--text);
 }
 
+#padrow {
+  display: grid;
+  grid-template-columns: 1fr 3fr;
+  gap: 10px;
+}
+
+#refbtn {
+  height: 52px;
+  font-size: 15px;
+}
+
 #newline {
   height: 52px;
   background: var(--accent);
@@ -588,7 +599,51 @@ main {
   font-weight: 600;
 }
 
-#unitpop {
+.tok.ref.xchip {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--c) 45%, transparent);
+}
+
+.refrows {
+  display: grid;
+  gap: 8px;
+}
+
+.refrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  border: none;
+  border-radius: 12px;
+  background: var(--key-fn);
+  padding: 10px 14px;
+  font-family: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.refrow .rn {
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.refrow .rv2 {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.refempty {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 12px 4px;
+}
+
+#unitpop, #refpop {
   position: absolute;
   left: 12px;
   right: calc(12px + env(safe-area-inset-right, 0px));
@@ -603,7 +658,7 @@ main {
   overflow-y: auto;
 }
 
-#unitpop h3 {
+#unitpop h3, #refpop h3 {
   margin: 12px 2px 7px;
   font-size: 11px;
   font-weight: 600;
@@ -664,7 +719,7 @@ main {
   .line { font-size: 23px; min-height: 48px; }
   .result { font-size: 21px; }
 
-  #unitpop {
+  #unitpop, #refpop {
     bottom: 120px;
     left: 12px;
     right: 12px;
