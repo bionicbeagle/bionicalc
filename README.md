@@ -43,7 +43,9 @@ Calculations form a flowing document instead of a single display:
   units of one dimension convert automatically (the left unit wins), unitless operands
   adopt the other side's unit, and `×`/`÷` compose and cancel: `2cm × 3cm = 6 cm²`,
   `100km / 2h = 50 km/h`, `1m / 50cm = 2`. Volumes are length³, so `2cm × 3cm × 4cm +
-  10ml = 34 cm³`. A unit typed after a reference converts it (`[15 cm] mm → 150 mm`);
+  10ml = 34 cm³`. Powers work as suffixes — `5m2` is five square meters, and tapping the
+  same unit key again cycles cm → cm² → cm³. A unit typed after a reference converts it
+  (`[15 cm] mm → 150 mm`, `[4,224 mm²] cm2 → 42.24 cm²`);
   incompatible dimensions (`kg + cm`) show a unit error. Supported: length (mm cm m km
   in ft yd mi), mass (mg g kg oz lb t), time (ms s min h d), volume (ml cl dl l gal).
 - **Continue from the last answer.** Press an operator on an empty line and the previous

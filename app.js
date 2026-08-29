@@ -63,6 +63,21 @@ const UNITS = {
 const UNIT_NAMES = Object.keys(UNITS);
 const isUnitPrefix = (s) => UNIT_NAMES.some((n) => n.startsWith(s));
 
+// A unit token's text may carry a power: "cm2" is cm², "mm3" is mm³.
+function parseUnitTok(v) {
+  const m = /^([a-z]+)([23])?$/.exec(v);
+  return m ? { sym: m[1], e: m[2] ? Number(m[2]) : 1 } : { sym: v, e: 1 };
+}
+
+const fmtUnitTok = (v) => v.replace(/2$/, '²').replace(/3$/, '³');
+
+function scaleDim(dim, e) {
+  if (e === 1) return { ...dim };
+  const out = {};
+  for (const [k, x] of Object.entries(dim)) out[k] = x * e;
+  return out;
+}
+
 const state = {
   lines: [],      // [{ id, tokens: [...] }]
   activeId: null,
@@ -178,11 +193,15 @@ function composeUnits(a, b, s) {
 }
 
 // Postfix unit: stamp a unitless value, or re-express a same-dimension one.
-function applyUnit(v, sym) {
+// Handles powered tokens ("cm2", "mm3") — so 44mm × 96mm followed by cm2
+// converts the area, and 5 m2 enters five square meters.
+function applyUnit(v, tokV) {
+  const { sym, e } = parseUnitTok(tokV);
   const u = UNITS[sym];
   if (!u) return v; // half-typed unit ("c" on the way to "cm") — ignore for now
-  if (dimless(v.dim)) return { si: v.si * u.factor, dim: { ...u.dim }, unit: { [sym]: 1 } };
-  if (sameDim(v.dim, u.dim)) return { ...v, unit: { [sym]: 1 } };
+  const dim = scaleDim(u.dim, e);
+  if (dimless(v.dim)) return { si: v.si * u.factor ** e, dim, unit: { [sym]: e } };
+  if (sameDim(v.dim, dim)) return { ...v, unit: { [sym]: e } };
   throw UNIT_ERR;
 }
 
@@ -416,6 +435,11 @@ function inputDigit(d) {
     return;
   }
   const prev = line.tokens[state.caret - 1];
+  // A 2 or 3 right after a complete unit binds as its power: "cm2" is cm².
+  if (prev && prev.t === 'u' && (d === '2' || d === '3') && UNITS[prev.v]) {
+    prev.v += d;
+    return;
+  }
   if (prev && prev.t === 'n') {
     if (d === '.') { if (!prev.v.includes('.')) prev.v += '.'; }
     else if (prev.v === '0') prev.v = d;
@@ -456,11 +480,17 @@ function inputOp(op) {
 
 // Tap a unit key: insert a whole unit token, or swap the one already there
 // (tapping cm then mm should correct the unit, not concatenate letters).
+// Tapping the SAME unit again cycles its power: cm → cm² → cm³ → cm.
 function inputUnit(sym) {
   const line = activeLine();
   if (state.sel) { state.caret = state.sel.idx + 1; state.sel = null; }
   const prev = line.tokens[state.caret - 1];
-  if (prev && prev.t === 'u') { prev.v = sym; return; }
+  if (prev && prev.t === 'u') {
+    const cur = parseUnitTok(prev.v);
+    if (cur.sym === sym) prev.v = sym + (cur.e === 1 ? '2' : cur.e === 2 ? '3' : '');
+    else prev.v = sym;
+    return;
+  }
   if (isValue(prev)) insertToken({ t: 'u', v: sym });
 }
 
@@ -628,8 +658,9 @@ function frozenTokensFor(r) {
   if (!r || r.err) return [{ t: 'n', v: '0' }];
   const syms = Object.entries(r.unit);
   if (!syms.length) return [{ t: 'n', v: plainNum(r.v) }];
-  if (syms.length === 1 && syms[0][1] === 1) {
-    return [{ t: 'n', v: plainNum(r.v) }, { t: 'u', v: syms[0][0] }];
+  if (syms.length === 1 && syms[0][1] >= 1 && syms[0][1] <= 3) {
+    const [sym, e] = syms[0];
+    return [{ t: 'n', v: plainNum(r.v) }, { t: 'u', v: sym + (e === 1 ? '' : e) }];
   }
   return [{ t: 'n', v: plainNum(r.si) }];
 }
@@ -1158,7 +1189,7 @@ function tokenEl(line, tok, i) {
     s.textContent = tok.v;
   } else if (tok.t === 'u') {
     s.className = 'tok unit';
-    s.textContent = tok.v;
+    s.textContent = fmtUnitTok(tok.v);
   } else if (tok.t === 'r') {
     const cross = tok.sheet !== undefined;
     s.className = 'tok ref' + (cross ? ' xchip' : '') + (selected ? ' selected' : '');
@@ -1307,6 +1338,7 @@ function render() {
     if (sym) {
       b.dataset.key = 'unit:' + sym;
       b.textContent = sym;
+      b.title = `${sym} — tap again for ${sym}², ${sym}³`;
     }
   });
 

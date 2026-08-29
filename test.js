@@ -518,4 +518,46 @@ t('switchSheet(currentProject().sheets[1].id)');
 check('cross ref survives import remap', lastVal(), '150');
 check('imported chip still cross-sheet', t('state.lines[0].tokens[0].sheet'), 1);
 
+// 47. Powered unit suffixes: entry, conversion, cycling, freezing
+NL();
+keys(['5', 'm', '2']);
+check('5m2 enters square meters', lastVal(), '5 m²');
+NL();
+keys(['2', 'm', '2', '+', '5', '0', '0', '0', 'c', 'm', '2']);
+check('mixed-power addition converts', lastVal(), '2.5 m²');
+NL();
+keys(['4', '4', 'm', 'm', '*', '9', '6', 'm', 'm']);
+check('setup: area in mm²', lastVal(), '4,224 mm²');
+NL();
+t('insertRefFrom(state.lines[state.lines.length - 2].id)');
+keys(['c', 'm', '2']);
+check('[area mm²] cm2 converts', lastVal(), '42.24 cm²');
+NL();
+keys(['1', 'l']);
+NL();
+t('insertRefFrom(state.lines[state.lines.length - 2].id)');
+keys(['c', 'm', '3']);
+check('[1 l] cm3 bridges volume to length³', lastVal(), '1,000 cm³');
+NL();
+keys(['5', 'unit:cm', 'unit:cm']);
+check('tapping the same unit squares it', lastVal(), '5 cm²');
+keys(['unit:cm']);
+check('third tap cubes it', lastVal(), '5 cm³');
+keys(['unit:cm']);
+check('fourth tap cycles back', lastVal(), '5 cm');
+keys(['unit:cm', 'backspace']);
+check('backspace strips the power first', t('state.lines[state.lines.length - 1].tokens[1].v'), 'cm');
+keys(['2', '5']);
+check('digit after a powered unit multiplies', lastVal(), '25 cm²');
+
+// 48. Deleting a line freezes powered units intact
+NL();
+keys(['3', 'm', '2']);
+t('startLabelEdit(state.activeId); commitLabel(state.activeId, "panel")');
+NL();
+keys(['+', '1', 'm', '2']);
+t('(() => { const src = state.lines[state.lines.length - 2]; const b = snapshot(); removeLine(src.id); commitHistory(b, null); update(); })()');
+check('powered unit frozen on delete', lastVal(), '4 m²');
+check('frozen token keeps its power', t('state.lines[state.lines.length - 1].tokens[1].v'), 'm2');
+
 process.exit(failures ? 1 : 0);
