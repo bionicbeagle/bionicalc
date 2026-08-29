@@ -20,6 +20,10 @@ Calculations form a flowing document instead of a single display:
   dependent results update on the fly.
 - **Hover to trace.** Hovering a result highlights every reference to it across the
   document (and hovering a reference chip lights up its source), in the line's color.
+- **Projects.** Tabs above the keypad hold separate pages of calculations, each with its
+  own undo history. Tap a tab to switch, tap the active tab to rename it, `+` for a new
+  project, and the active tab's `×` (tap twice) to delete one. Existing single-document
+  storage migrates into "Project 1" automatically.
 - **Units.** Add a unit after a value — type it, or tap it on the keypad's quick-unit
   row (the four most recently used units; "…" opens the full grouped list):
   `12cm + 30mm = 15 cm`. Mixed

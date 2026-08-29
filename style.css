@@ -439,6 +439,87 @@ main {
   border-left: 1px solid var(--border);
 }
 
+#projtabs {
+  margin-bottom: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+}
+
+.ptab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 13px;
+  border-radius: 999px;
+  background: var(--key-fn);
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.ptab .pname {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 18ch;
+}
+
+.ptab.active {
+  background: color-mix(in srgb, var(--accent) 15%, var(--key-fn));
+  color: var(--accent);
+}
+
+.ptab input {
+  font: inherit;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  border-bottom: 1.5px solid var(--accent);
+  outline: none;
+  width: 8ch;
+  padding: 0;
+}
+
+.pdel {
+  border: none;
+  background: none;
+  color: inherit;
+  opacity: 0.55;
+  font-size: 15px;
+  font-family: inherit;
+  line-height: 1;
+  padding: 0 1px;
+  cursor: pointer;
+}
+
+.pdel:hover { opacity: 1; }
+
+.pdel.armed {
+  color: var(--danger);
+  opacity: 1;
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.padd {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--key-fn);
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.padd:hover { color: var(--text); }
+
 #pad .grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

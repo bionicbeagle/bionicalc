@@ -304,4 +304,62 @@ NL();
 keys(['unit:cm']);
 check('unit tap needs a value first', t('state.lines[state.lines.length - 1].tokens.length'), 0);
 
+// 36. Projects: separate documents with separate undo stacks
+check('starts with one project', t('projects.length'), 1);
+const p1 = t('currentProjectId');
+const p1Undo = t('undoStack.length');
+const p1Lines = t('state.lines.length');
+t('newProject()');
+check('new project created and adopted', t('projects.length'), 2);
+check('fresh project is one empty line', t('state.lines.length'), 1);
+check('fresh project has a fresh undo stack', t('undoStack.length'), 0);
+keys(['4', '2']);
+check('typing lands in project 2', res(0), 42);
+check('project 2 has one undo step', t('undoStack.length'), 1);
+t(`switchProject(${p1})`);
+check('project 1 document intact', t('state.lines.length'), p1Lines);
+check('project 1 undo stack intact', t('undoStack.length'), p1Undo);
+t('switchProject(projects[1].id)');
+check('project 2 document kept across switches', res(0), 42);
+check('project 2 undo stack kept across switches', t('undoStack.length'), 1);
+t('undo()');
+check('undo stays inside project 2', res(0), null);
+check('project 1 still untouched by that undo', t(`projects.find(p => p.id === ${p1}).lines.length`), p1Lines);
+
+// 37. Rename (trimmed) and delete (falls back to the neighbor)
+t('projRenameId = currentProjectId; renameProject(currentProjectId, "  Bench  ");');
+check('rename trims and applies', t('projects[1].name'), 'Bench');
+t('deleteProject(currentProjectId)');
+check('delete removes the project', t('projects.length'), 1);
+check('neighbor project adopted', t('currentProjectId'), p1);
+check('adopted document is project 1', t('state.lines.length'), p1Lines);
+
+// 38. Old single-document storage migrates into a project
+{
+  const stored = {
+    data: JSON.stringify({
+      lines: [{ id: 1, tokens: [{ t: 'n', v: '7' }] }],
+      activeId: 1, colors: {}, nextId: 2, nextColor: 0,
+    }),
+  };
+  const sb = {
+    console, setTimeout, clearTimeout,
+    document: { getElementById: () => el(), createElement: () => el() },
+    window: { addEventListener() {} },
+    navigator: { platform: 'MacIntel' },
+    localStorage: {
+      getItem: () => stored.data,
+      setItem: (k, v) => { stored.data = v; },
+    },
+  };
+  sb.window.window = sb.window;
+  const ctx2 = vm.createContext(sb);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), ctx2, { filename: 'app.js' });
+  const m = (c) => vm.runInContext(c, ctx2);
+  check('migration: one project', m('projects.length'), 1);
+  check('migration: document intact', m('results.get(state.lines[0].id).v'), 7);
+  check('migration: named', m('projects[0].name'), 'Project 1');
+  check('migration: saved in new format', m('JSON.parse(localStorage.getItem("bionicalc.v1")).projects.length'), 1);
+}
+
 process.exit(failures ? 1 : 0);

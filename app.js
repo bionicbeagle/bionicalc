@@ -76,8 +76,22 @@ const state = {
 let results = new Map();  // lineId -> { v } | { err } | null (empty line)
 let prevFmt = new Map();  // lineId -> last displayed result, to flash changes
 
-const undoStack = [];     // snapshots taken BEFORE each mutation
-const redoStack = [];
+/*
+ * Projects: separate pages of calculations, shown as tabs above the keypad.
+ * `state` always holds the CURRENT project's document (adoptProject swaps it
+ * in by reference); each project keeps its own undo/redo stacks, rebound on
+ * switch. References never cross projects.
+ */
+let projects = [];          // [{id, name, lines, activeId, colors, nextId, nextColor}]
+let currentProjectId = null;
+let nextProjectId = 1;
+const histories = new Map(); // projectId -> {undo, redo}
+let projRenameId = null;    // project tab being renamed (transient)
+let projDelArm = null;      // project id whose delete button is armed
+let projDelTimer;
+
+let undoStack = [];         // the CURRENT project's stacks (see adoptProject)
+let redoStack = [];
 const HISTORY_MAX = 200;
 let lastKind = null;      // 'digit' | 'backspace' | null — for coalescing typing runs
 let lastKindLine = null;
@@ -710,6 +724,109 @@ function sizeLabelInput(inp) {
   inp.style.width = Math.max(inp.value.length, 5) + 1 + 'ch';
 }
 
+/* ================= projects ================= */
+
+function freshProject() {
+  const id = nextProjectId++;
+  return {
+    id,
+    name: 'Project ' + id,
+    lines: [{ id: 1, tokens: [] }],
+    activeId: 1,
+    colors: {},
+    nextId: 2,
+    nextColor: 0,
+  };
+}
+
+// state and the current project's record share the same arrays, but undo's
+// restore() and "Clear all" rebind state fields — re-point the record.
+function syncCurrentProject() {
+  const p = projects.find((x) => x.id === currentProjectId);
+  if (!p) return;
+  p.lines = state.lines;
+  p.activeId = state.activeId;
+  p.colors = state.colors;
+  p.nextId = state.nextId;
+  p.nextColor = state.nextColor;
+}
+
+// Make a project the working document: swap its fields into `state` and
+// rebind the undo/redo stacks to its own history.
+function adoptProject(id) {
+  const p = projects.find((x) => x.id === id);
+  if (!p) return;
+  currentProjectId = id;
+  state.lines = p.lines;
+  state.colors = p.colors;
+  state.nextId = p.nextId;
+  state.nextColor = p.nextColor;
+  state.activeId = p.lines.some((l) => l.id === p.activeId)
+    ? p.activeId
+    : p.lines[p.lines.length - 1].id;
+  state.caret = activeLine().tokens.length;
+  state.sel = null;
+  let h = histories.get(id);
+  if (!h) {
+    h = { undo: [], redo: [] };
+    histories.set(id, h);
+  }
+  undoStack = h.undo;
+  redoStack = h.redo;
+  breakCoalescing();
+  prevFmt = new Map();
+  hoverRefId = null;
+  labelEditId = null;
+  labelEditSnap = null;
+}
+
+function switchProject(id) {
+  if (id === currentProjectId || !projects.some((p) => p.id === id)) return;
+  commitLabelEditFromDom();
+  closeUnitPop();
+  syncCurrentProject();
+  adoptProject(id);
+  update();
+}
+
+function newProject() {
+  commitLabelEditFromDom();
+  syncCurrentProject();
+  const p = freshProject();
+  projects.push(p);
+  adoptProject(p.id);
+  update();
+}
+
+function deleteProject(id) {
+  const idx = projects.findIndex((p) => p.id === id);
+  if (idx < 0) return;
+  projects.splice(idx, 1);
+  histories.delete(id);
+  if (!projects.length) projects.push(freshProject());
+  if (currentProjectId === id) {
+    adoptProject(projects[Math.min(Math.max(0, idx - 1), projects.length - 1)].id);
+  }
+  update();
+}
+
+function startProjectRename(id) {
+  commitLabelEditFromDom();
+  projRenameId = id;
+  render();
+}
+
+function renameProject(id, raw) {
+  if (projRenameId !== id) return;
+  projRenameId = null;
+  const p = projects.find((x) => x.id === id);
+  if (p) {
+    const name = raw.trim().slice(0, 24);
+    if (name) p.name = name;
+  }
+  update();
+}
+
 function press(key) {
   if (!activeLine()) {
     state.activeId = state.lines[state.lines.length - 1].id;
@@ -923,6 +1040,8 @@ function render() {
     }
   });
 
+  renderProjects();
+
   if (labelEditId !== null) {
     const inp = linesEl.querySelector('.label-input');
     if (inp) {
@@ -948,6 +1067,67 @@ function render() {
   if (act) act.scrollIntoView({ block: 'nearest' });
 
   applyRefHighlight();
+}
+
+/* ---- project tabs ---- */
+
+function renderProjects() {
+  const cont = document.getElementById('projtabs');
+  cont.textContent = '';
+  for (const p of projects) {
+    const tab = document.createElement('div');
+    tab.className = 'ptab' + (p.id === currentProjectId ? ' active' : '');
+    tab.dataset.pid = p.id;
+    if (projRenameId === p.id) {
+      const inp = document.createElement('input');
+      inp.value = p.name;
+      inp.maxLength = 24;
+      inp.spellcheck = false;
+      tab.appendChild(inp);
+    } else {
+      const nm = document.createElement('span');
+      nm.className = 'pname';
+      nm.textContent = p.name;
+      tab.appendChild(nm);
+      if (p.id === currentProjectId) {
+        tab.title = 'Tap again to rename';
+        const del = document.createElement('button');
+        del.className = 'pdel' + (projDelArm === p.id ? ' armed' : '');
+        del.textContent = projDelArm === p.id ? 'sure?' : '×';
+        del.title = 'Delete this project';
+        tab.appendChild(del);
+      } else {
+        tab.title = 'Switch to ' + p.name;
+      }
+    }
+    cont.appendChild(tab);
+  }
+  const add = document.createElement('button');
+  add.className = 'padd';
+  add.textContent = '+';
+  add.title = 'New project';
+  cont.appendChild(add);
+
+  if (projRenameId !== null) {
+    const inp = cont.querySelector('.ptab input');
+    if (inp) {
+      const id = projRenameId;
+      const size = () => { inp.style.width = Math.max(inp.value.length, 4) + 2 + 'ch'; };
+      size();
+      inp.addEventListener('input', size);
+      inp.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') renameProject(id, inp.value);
+        else if (e.key === 'Escape') {
+          projRenameId = null;
+          render();
+        }
+      });
+      inp.addEventListener('blur', () => renameProject(id, inp.value));
+      inp.focus();
+      inp.select();
+    }
+  }
 }
 
 /* ---- hover: light up a result and every reference to it ---- */
@@ -982,39 +1162,45 @@ function setRefHighlight(id) {
 /* ================= persistence ================= */
 
 function save() {
+  syncCurrentProject();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
-      lines: state.lines,
-      activeId: state.activeId,
-      colors: state.colors,
-      nextId: state.nextId,
-      nextColor: state.nextColor,
+      projects,
+      currentId: currentProjectId,
+      nextProjectId,
       quickUnits,
     }));
   } catch { /* storage unavailable — run without persistence */ }
 }
 
 function load() {
+  let currentId = null;
   try {
     const d = JSON.parse(localStorage.getItem(STORE_KEY));
     if (d && Array.isArray(d.quickUnits)) {
       const valid = d.quickUnits.filter((s) => UNITS[s]);
       if (valid.length) quickUnits = valid.slice(0, 4);
     }
-    if (d && Array.isArray(d.lines) && d.lines.length) {
-      state.lines = d.lines;
-      state.colors = d.colors || {};
-      state.nextId = d.nextId || Math.max(...d.lines.map((l) => l.id)) + 1;
-      state.nextColor = d.nextColor || 0;
-      state.activeId = d.lines.some((l) => l.id === d.activeId)
-        ? d.activeId
-        : d.lines[d.lines.length - 1].id;
-      state.caret = activeLine().tokens.length;
-      return;
+    if (d && Array.isArray(d.projects) && d.projects.length) {
+      projects = d.projects.filter((p) => p && Array.isArray(p.lines) && p.lines.length);
+      nextProjectId = d.nextProjectId || Math.max(...projects.map((p) => p.id)) + 1;
+      currentId = d.currentId;
+    } else if (d && Array.isArray(d.lines) && d.lines.length) {
+      // migrate the old single-document storage into the first project
+      projects = [{
+        id: 1,
+        name: 'Project 1',
+        lines: d.lines,
+        activeId: d.activeId,
+        colors: d.colors || {},
+        nextId: d.nextId || Math.max(...d.lines.map((l) => l.id)) + 1,
+        nextColor: d.nextColor || 0,
+      }];
+      nextProjectId = 2;
     }
   } catch { /* corrupt state — start fresh */ }
-  state.lines = [{ id: state.nextId++, tokens: [] }];
-  state.activeId = state.lines[0].id;
+  if (!projects.length) projects = [freshProject()];
+  adoptProject(projects.some((p) => p.id === currentId) ? currentId : projects[0].id);
 }
 
 function update() {
@@ -1265,6 +1451,35 @@ document.getElementById('more-units').addEventListener('click', () => {
   unitPop.hidden = !unitPop.hidden;
 });
 
+document.getElementById('projtabs').addEventListener('click', (e) => {
+  if (e.target.closest('input')) return;
+  if (e.target.closest('.padd')) {
+    newProject();
+    return;
+  }
+  const tab = e.target.closest('.ptab');
+  if (!tab) return;
+  const pid = Number(tab.dataset.pid);
+  if (e.target.closest('.pdel')) {
+    if (projDelArm === pid) {
+      clearTimeout(projDelTimer);
+      projDelArm = null;
+      deleteProject(pid);
+    } else {
+      projDelArm = pid;
+      clearTimeout(projDelTimer);
+      projDelTimer = setTimeout(() => {
+        projDelArm = null;
+        render();
+      }, 2500);
+      render();
+    }
+    return;
+  }
+  if (pid === currentProjectId) startProjectRename(pid);
+  else switchProject(pid);
+});
+
 window.addEventListener('pointerdown', (e) => {
   if (unitPop.hidden || !e.target.closest) return;
   if (!e.target.closest('#unitpop') && !e.target.closest('#more-units')) closeUnitPop();
@@ -1308,7 +1523,16 @@ clearAllBtn.addEventListener('click', () => {
 });
 
 load();
+save(); // persist immediately so a migrated document is stored in the new format
 render();
 
-// Debug/console access.
-window.__bionicalc = { state, evaluateAll, undoStack, redoStack };
+// Debug/console access. Getters because the stacks are rebound per project.
+window.__bionicalc = {
+  state,
+  evaluateAll,
+  switchProject,
+  get projects() { return projects; },
+  get currentProjectId() { return currentProjectId; },
+  get undoStack() { return undoStack; },
+  get redoStack() { return redoStack; },
+};
