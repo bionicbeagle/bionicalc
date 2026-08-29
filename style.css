@@ -445,11 +445,63 @@ main {
 }
 
 #projtabs {
-  margin-bottom: auto;
   display: flex;
   flex-wrap: wrap;
   align-content: flex-start;
   gap: 8px;
+}
+
+/* Live summary of every labeled result in the project, in the otherwise
+   empty stretch between the project tabs and the keypad. */
+#summary {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  margin: 14px 2px 4px;
+}
+
+#summary h4 {
+  margin: 14px 7px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+#summary h4:first-child { margin-top: 0; }
+
+.srow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 9px;
+  border: none;
+  border-radius: 9px;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.srow:hover { background: var(--line-hover); }
+
+.srow .sl {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.srow .sv {
+  font-size: 14px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 #sheettabs {
@@ -708,6 +760,8 @@ main {
   main { flex-direction: column; }
 
   header .tagline { display: none; }
+
+  #summary { display: none; }
 
   #canvas { padding: 12px 12px 24px; }
 

@@ -31,6 +31,9 @@ Calculations form a flowing document instead of a single display:
   live chip (dashed outline). Editing the master updates every sheet that uses it. The
   whole project evaluates as one dependency graph, cycles are refused across sheets,
   and deleting a referenced line or sheet freezes its values into its dependents.
+- **Summary rail.** On wide screens, the space under the project tabs shows every
+  labeled result in the project, grouped by sheet, with live values in their chip
+  colors — tap a row to insert that reference, hover to trace where it's used.
 - **Export / import.** Export downloads every project as a JSON file (backup, or moving
   work between devices); import adds a file's projects as new tabs and never overwrites
   what's already there.

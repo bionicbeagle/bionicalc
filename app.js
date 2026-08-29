@@ -1312,6 +1312,7 @@ function render() {
 
   projectBar.render();
   sheetBar.render();
+  renderSummary();
 
   if (labelEditId !== null) {
     const inp = linesEl.querySelector('.label-input');
@@ -1477,6 +1478,43 @@ const sheetBar = makeTabBar(document.getElementById('sheettabs'), {
   addTitle: 'New sheet',
   deleteTitle: 'Delete this sheet',
 });
+
+/* ---- summary: every labeled result in the project, under the tabs ---- */
+
+function renderSummary() {
+  const cont = document.getElementById('summary');
+  cont.textContent = '';
+  const p = currentProject();
+  if (!p) return;
+  for (const s of p.sheets) {
+    const labeled = s.lines.filter((l) => l.label);
+    if (!labeled.length) continue;
+    const h = document.createElement('h4');
+    h.textContent = s.name + (s.id === p.currentSheetId ? ' · this sheet' : '');
+    cont.appendChild(h);
+    for (const l of labeled) {
+      const entry = projResults.get(s.id + ':' + l.id);
+      const b = document.createElement('button');
+      b.className = 'srow';
+      b.dataset.sheet = s.id;
+      b.dataset.line = l.id;
+      b.title = `Insert ${l.label} into the current line`;
+      const sl = document.createElement('span');
+      sl.className = 'sl';
+      sl.textContent = l.label;
+      const sv = document.createElement('span');
+      sv.className = 'sv';
+      sv.textContent = entry ? (entry.err || fmtVal(entry)) : '…';
+      const ci = s.colors[l.id];
+      if (ci !== undefined && entry && !entry.err) {
+        sv.style.color = PALETTE[ci];
+        sv.style.fontWeight = '600';
+      }
+      b.append(sl, sv);
+      cont.appendChild(b);
+    }
+  }
+}
 
 /* ---- hover: light up a result and every reference to it ---- */
 
@@ -1844,6 +1882,21 @@ document.getElementById('more-units').addEventListener('click', () => {
   unitPop.hidden = !unitPop.hidden;
 });
 
+
+const summaryEl = document.getElementById('summary');
+summaryEl.addEventListener('click', (e) => {
+  const row = e.target.closest('.srow');
+  if (!row) return;
+  const sid = Number(row.dataset.sheet);
+  const lid = Number(row.dataset.line);
+  if (sid === currentProject().currentSheetId) insertRefFrom(lid);
+  else insertCrossRef(sid, lid);
+});
+summaryEl.addEventListener('mouseover', (e) => {
+  const row = e.target.closest('.srow');
+  setRefHighlight(row ? row.dataset.sheet + ':' + row.dataset.line : null);
+});
+summaryEl.addEventListener('mouseleave', () => setRefHighlight(null));
 
 /* ---- cross-sheet reference picker ---- */
 
