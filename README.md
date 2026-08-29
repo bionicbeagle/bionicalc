@@ -1,0 +1,50 @@
+# BioniCalc
+
+A reactive calculator that runs entirely in the browser —
+plain HTML/CSS/JS, no build step, no backend.
+
+Open `index.html` directly, or serve the folder with any static server:
+
+```sh
+python3 -m http.server 8000
+```
+
+## How it works
+
+Calculations form a flowing document instead of a single display:
+
+- **Every line is live.** Type with your keyboard or the pad; the result updates as you type.
+- **Results are values.** Tap any result to insert it into the line you're editing as a live
+  reference (a colored chip). When the source changes, everything using it recalculates.
+- **Everything is editable.** Tap any number anywhere in the history and retype it — all
+  dependent results update on the fly.
+- **Hover to trace.** Hovering a result highlights every reference to it across the
+  document (and hovering a reference chip lights up its source), in the line's color.
+- **Continue from the last answer.** Press an operator on an empty line and the previous
+  result is pulled in automatically.
+- **Labels.** Hover a line and click "label" to name it ("subtotal", "VAT"). The label is
+  shown next to the result and inside every reference chip that uses it, so downstream
+  lines read like `[subtotal] × 0.25`. Click a label to edit it; clear it to remove it.
+- **Undo/redo.** ⌘Z / Ctrl+Z and ⇧⌘Z / Ctrl+Y (also buttons in the header). Typing runs
+  coalesce into single steps; deleting lines and "Clear all" are fully undoable.
+- **Reordering.** Drag the ⠿ handle (hover the left edge of a line) or press ⌥↑ / ⌥↓ to
+  move the active line. References stay live wherever lines sit — results can be
+  referenced upward or downward; only circular references are refused.
+- ⏎ starts a new calculation. `%` divides by 100 (postfix). Deleting a line freezes any
+  references to it into plain numbers so nothing downstream breaks (undo restores the
+  live reference).
+- State is saved in `localStorage`, so your document survives reloads.
+
+## Architecture
+
+Each line is a token list (`number | operator | paren | reference`). References form a
+cycle-free graph: an insertion that would close a loop is refused up front, and evaluation
+resolves references recursively with memoization, so results are independent of document
+order and lines can be reordered freely. Incomplete input is handled by evaluating the
+longest valid prefix, so half-typed lines still show a live result.
+
+| File | Role |
+| --- | --- |
+| `index.html` | Layout and keypad |
+| `style.css` | Theming (light/dark via `prefers-color-scheme`), responsive layout |
+| `app.js` | Token model, evaluator, editing/caret logic, rendering, persistence |

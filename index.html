@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>BioniCalc</title>
+<link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y="82" font-size="82">🧮</text></svg>'>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>BioniCalc</h1>
+  <p class="tagline">a reactive calculator</p>
+  <div class="hbtns">
+    <button id="undo" title="Undo">↩</button>
+    <button id="redo" title="Redo">↪</button>
+    <button id="clear-all" title="Clear all calculations">Clear all</button>
+  </div>
+</header>
+
+<main>
+  <section id="canvas">
+    <div id="lines"></div>
+    <p id="hint">
+      Type a calculation with your keyboard or the pad, then press ⏎ for a new line.
+      Starting a line with an operator continues from the result above.<br><br>
+      Tap any <b>result</b> to use it as a live value in the line you're editing,
+      and tap any <b>number</b> to retype it — everything that depends on it updates instantly.<br><br>
+      Hover a line to <b>label</b> it ("subtotal", "VAT") — labels show up wherever the
+      result is referenced. Undo any change with ⌘Z / Ctrl+Z.<br><br>
+      Drag the <b>⠿</b> handle (or press ⌥↑ / ⌥↓) to <b>reorder</b> lines — references
+      stay live wherever their lines sit.
+    </p>
+  </section>
+
+  <aside id="pad">
+    <div class="grid">
+      <button class="key fn" data-key="clear" title="Clear this line">C</button>
+      <button class="key fn" data-key="(">(</button>
+      <button class="key fn" data-key=")">)</button>
+      <button class="key fn" data-key="backspace" title="Backspace">⌫</button>
+
+      <button class="key" data-key="7">7</button>
+      <button class="key" data-key="8">8</button>
+      <button class="key" data-key="9">9</button>
+      <button class="key op" data-key="/">÷</button>
+
+      <button class="key" data-key="4">4</button>
+      <button class="key" data-key="5">5</button>
+      <button class="key" data-key="6">6</button>
+      <button class="key op" data-key="*">×</button>
+
+      <button class="key" data-key="1">1</button>
+      <button class="key" data-key="2">2</button>
+      <button class="key" data-key="3">3</button>
+      <button class="key op" data-key="-">−</button>
+
+      <button class="key" data-key="0">0</button>
+      <button class="key" data-key=".">.</button>
+      <button class="key fn" data-key="%">%</button>
+      <button class="key op" data-key="+">+</button>
+    </div>
+    <button id="newline" class="key" data-key="enter">new line&ensp;⏎</button>
+  </aside>
+</main>
+
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
