@@ -223,6 +223,24 @@ main {
   font-weight: 400;
 }
 
+.tok.unit {
+  color: var(--muted);
+  font-size: 0.72em;
+  font-weight: 500;
+  margin-left: 3px;
+}
+
+.result .runit {
+  color: var(--muted);
+  font-size: 0.72em;
+  font-weight: 500;
+}
+
+.result.tinted .runit {
+  color: var(--c);
+  opacity: 0.75;
+}
+
 .tok.ref {
   --c: var(--accent);
   background: color-mix(in srgb, var(--c) 14%, transparent);

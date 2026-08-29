@@ -20,6 +20,13 @@ Calculations form a flowing document instead of a single display:
   dependent results update on the fly.
 - **Hover to trace.** Hovering a result highlights every reference to it across the
   document (and hovering a reference chip lights up its source), in the line's color.
+- **Units.** Type a unit after a value (keyboard entry): `12cm + 30mm = 15 cm`. Mixed
+  units of one dimension convert automatically (the left unit wins), unitless operands
+  adopt the other side's unit, and `×`/`÷` compose and cancel: `2cm × 3cm = 6 cm²`,
+  `100km / 2h = 50 km/h`, `1m / 50cm = 2`. Volumes are length³, so `2cm × 3cm × 4cm +
+  10ml = 34 cm³`. A unit typed after a reference converts it (`[15 cm] mm → 150 mm`);
+  incompatible dimensions (`kg + cm`) show a unit error. Supported: length (mm cm m km
+  in ft yd mi), mass (mg g kg oz lb t), time (ms s min h d), volume (ml cl dl l gal).
 - **Continue from the last answer.** Press an operator on an empty line and the previous
   result is pulled in automatically.
 - **Labels.** Hover a line and click "label" to name it ("subtotal", "VAT"). The label is

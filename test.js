@@ -215,4 +215,62 @@ check('forced cycle errors line B', res(1), '—');
 t('state.lines[1].tokens.length -= 2; update(); 0');
 check('recovers when cycle removed', t('fmt(results.get(state.lines[0].id).v)'), '3.72');
 
+// 25. Units: typed entry, mixed-unit addition converts to the left unit
+const lastVal = () => t('fmtVal(results.get(state.lines[state.lines.length - 1].id))');
+NL();
+keys(['1', '2', 'c', 'm', '+', '3', '0', 'm', 'm']);
+check('12cm + 30mm', lastVal(), '15 cm');
+
+// 26. Unitless operands adopt the united side's unit; percent keeps units
+NL();
+keys(['1', '0', 'c', 'm', '+', '5']);
+check('10cm + 5', lastVal(), '15 cm');
+NL();
+keys(['1', '0', 'c', 'm', '*', '5', '0', '%']);
+check('10cm × 50%', lastVal(), '5 cm');
+
+// 27. Multiplication and division compose and cancel units
+NL();
+keys(['2', 'c', 'm', '*', '3', 'c', 'm']);
+check('2cm × 3cm', lastVal(), '6 cm²');
+NL();
+keys(['1', '0', '0', 'k', 'm', '/', '2', 'h']);
+check('100km / 2h', lastVal(), '50 km/h');
+NL();
+keys(['1', 'm', '/', '5', '0', 'c', 'm']);
+check('1m / 50cm cancels to a ratio', lastVal(), '2');
+
+// 28. Volume is length³, so cm·cm·cm meets ml
+NL();
+keys(['2', 'c', 'm', '*', '3', 'c', 'm', '*', '4', 'c', 'm', '+', '1', '0', 'm', 'l']);
+check('2cm × 3cm × 4cm + 10ml', lastVal(), '34 cm³');
+
+// 29. Incompatible dimensions error; incomplete units are ignored
+NL();
+keys(['5', 'k', 'g', '+', '3', 'c', 'm']);
+check('kg + cm is a unit error', res(t('state.lines.length') - 1), 'unit error');
+NL();
+keys(['1', 'c']);
+check('half-typed unit is ignored', lastVal(), '1');
+keys(['backspace']);
+check('backspace removes the unit letter', t('state.lines[state.lines.length - 1].tokens.length'), 1);
+keys(['q']);
+check('non-unit letter is ignored', t('state.lines[state.lines.length - 1].tokens.length'), 1);
+
+// 30. A unit typed after a reference converts it
+NL();
+keys(['1', '5', 'c', 'm']);
+NL();
+t('insertRefFrom(state.lines[state.lines.length - 2].id)');
+keys(['m', 'm']);
+check('[15 cm] mm converts', lastVal(), '150 mm');
+
+// 31. Deleting a referenced line freezes value AND unit
+NL();
+keys(['+', '2']);
+check('auto-ref continues from converted value', lastVal(), '152 mm');
+t('(() => { const src = state.lines[state.lines.length - 3]; const b = snapshot(); removeLine(src.id); commitHistory(b, null); update(); })()');
+check('frozen with unit intact', lastVal(), '152 mm');
+check('frozen tokens are number + unit', t('state.lines[state.lines.length - 2].tokens.slice(0, 2).map((x) => x.t).join("")'), 'nu');
+
 process.exit(failures ? 1 : 0);

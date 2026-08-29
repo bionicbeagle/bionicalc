@@ -23,6 +23,46 @@ const PALETTE = [
 const STORE_KEY = 'bionicalc.v1';
 const MAX_DIGITS = 15;
 
+/*
+ * Units. Values are evaluated as { si, dim, unit }: the magnitude in SI base
+ * units, a dimension exponent map (L = length, M = mass, T = time), and the
+ * display unit as a symbol→exponent map. A unit token acts as a postfix
+ * operator: it stamps a unitless value, or converts a value of the same
+ * dimension. Volumes carry dimension L³, so cm×cm×cm and ml are compatible.
+ */
+const UNITS = {
+  // length (SI metre)
+  mm: { dim: { L: 1 }, factor: 0.001 },
+  cm: { dim: { L: 1 }, factor: 0.01 },
+  m:  { dim: { L: 1 }, factor: 1 },
+  km: { dim: { L: 1 }, factor: 1000 },
+  in: { dim: { L: 1 }, factor: 0.0254 },
+  ft: { dim: { L: 1 }, factor: 0.3048 },
+  yd: { dim: { L: 1 }, factor: 0.9144 },
+  mi: { dim: { L: 1 }, factor: 1609.344 },
+  // mass (SI kilogram)
+  mg: { dim: { M: 1 }, factor: 1e-6 },
+  g:  { dim: { M: 1 }, factor: 0.001 },
+  kg: { dim: { M: 1 }, factor: 1 },
+  oz: { dim: { M: 1 }, factor: 0.028349523125 },
+  lb: { dim: { M: 1 }, factor: 0.45359237 },
+  t:  { dim: { M: 1 }, factor: 1000 },
+  // time (SI second)
+  ms: { dim: { T: 1 }, factor: 0.001 },
+  s:  { dim: { T: 1 }, factor: 1 },
+  min: { dim: { T: 1 }, factor: 60 },
+  h:  { dim: { T: 1 }, factor: 3600 },
+  d:  { dim: { T: 1 }, factor: 86400 },
+  // volume (L³)
+  ml: { dim: { L: 3 }, factor: 1e-6 },
+  cl: { dim: { L: 3 }, factor: 1e-5 },
+  dl: { dim: { L: 3 }, factor: 1e-4 },
+  l:  { dim: { L: 3 }, factor: 1e-3 },
+  gal: { dim: { L: 3 }, factor: 0.003785411784 },
+};
+const UNIT_NAMES = Object.keys(UNITS);
+const isUnitPrefix = (s) => UNIT_NAMES.some((n) => n.startsWith(s));
+
 const state = {
   lines: [],      // [{ id, tokens: [...] }]
   activeId: null,
@@ -50,7 +90,7 @@ const activeIndex = () => state.lines.findIndex((l) => l.id === state.activeId);
 
 // Tokens that can end an operand — a binary operator may follow these.
 const isValue = (t) =>
-  !!t && (t.t === 'n' || t.t === 'r' ||
+  !!t && (t.t === 'n' || t.t === 'r' || t.t === 'u' ||
     (t.t === 'p' && t.v === ')') || (t.t === 'o' && t.v === '%'));
 
 /* ================= evaluation ================= */
@@ -71,6 +111,59 @@ function cleanTokens(tokens) {
   return t;
 }
 
+/* ---- unit algebra ---- */
+
+const UNIT_ERR = new Error('unit-mismatch');
+const dimless = (d) => Object.keys(d).length === 0;
+
+function sameDim(a, b) {
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) {
+    if ((a[k] || 0) !== (b[k] || 0)) return false;
+  }
+  return true;
+}
+
+function addDims(a, b, s) {
+  const out = { ...a };
+  for (const [k, e] of Object.entries(b)) {
+    out[k] = (out[k] || 0) + s * e;
+    if (!out[k]) delete out[k];
+  }
+  return out;
+}
+
+// Combined SI factor of a display unit, e.g. { km:1, h:-1 } -> 1000/3600.
+function unitFactor(unit) {
+  let f = 1;
+  for (const [sym, e] of Object.entries(unit)) f *= UNITS[sym].factor ** e;
+  return f;
+}
+
+// Merge display units for × and ÷. A symbol of a dimension the left side
+// already shows folds onto the left symbol (m × cm stays in m), so same-
+// dimension units cancel: 1m / 50cm -> plain 2.
+function composeUnits(a, b, s) {
+  const out = { ...a };
+  for (const [sym, e] of Object.entries(b)) {
+    let key = sym;
+    if (!(key in out)) {
+      key = Object.keys(out).find((k) => sameDim(UNITS[k].dim, UNITS[sym].dim)) || sym;
+    }
+    out[key] = (out[key] || 0) + s * e;
+    if (!out[key]) delete out[key];
+  }
+  return out;
+}
+
+// Postfix unit: stamp a unitless value, or re-express a same-dimension one.
+function applyUnit(v, sym) {
+  const u = UNITS[sym];
+  if (!u) return v; // half-typed unit ("c" on the way to "cm") — ignore for now
+  if (dimless(v.dim)) return { si: v.si * u.factor, dim: { ...u.dim }, unit: { [sym]: 1 } };
+  if (sameDim(v.dim, u.dim)) return { ...v, unit: { [sym]: 1 } };
+  throw UNIT_ERR;
+}
+
 function parseTokens(tokens, resolve) {
   let i = 0;
   const fail = () => { throw new Error('parse'); };
@@ -79,10 +172,21 @@ function parseTokens(tokens, resolve) {
     let v = term();
     while (i < tokens.length && tokens[i].t === 'o' && (tokens[i].v === '+' || tokens[i].v === '-')) {
       const op = tokens[i++].v;
-      const r = term();
-      v = op === '+' ? v + r : v - r;
+      v = addSub(v, term(), op === '+' ? 1 : -1);
     }
     return v;
+  }
+
+  // A unitless operand adopts the other side's unit (10cm + 5 = 15 cm);
+  // otherwise dimensions must match, and the left display unit wins.
+  function addSub(a, b, sign) {
+    if (dimless(a.dim) && !dimless(b.dim)) {
+      a = { si: a.si * unitFactor(b.unit), dim: b.dim, unit: b.unit };
+    } else if (!dimless(a.dim) && dimless(b.dim)) {
+      b = { si: b.si * unitFactor(a.unit), dim: a.dim, unit: a.unit };
+    }
+    if (!sameDim(a.dim, b.dim)) throw UNIT_ERR;
+    return { si: a.si + sign * b.si, dim: a.dim, unit: Object.keys(a.unit).length ? a.unit : b.unit };
   }
 
   function term() {
@@ -90,7 +194,12 @@ function parseTokens(tokens, resolve) {
     while (i < tokens.length && tokens[i].t === 'o' && (tokens[i].v === '*' || tokens[i].v === '/')) {
       const op = tokens[i++].v;
       const r = factor();
-      v = op === '*' ? v * r : v / r;
+      const s = op === '*' ? 1 : -1;
+      v = {
+        si: op === '*' ? v.si * r.si : v.si / r.si,
+        dim: addDims(v.dim, r.dim, s),
+        unit: composeUnits(v.unit, r.unit, s),
+      };
     }
     return v;
   }
@@ -99,8 +208,13 @@ function parseTokens(tokens, resolve) {
     let neg = false;
     while (i < tokens.length && tokens[i].t === 'o' && tokens[i].v === '-') { neg = !neg; i++; }
     let v = primary();
-    while (i < tokens.length && tokens[i].t === 'o' && tokens[i].v === '%') { v /= 100; i++; }
-    return neg ? -v : v;
+    for (;;) {
+      const tk = tokens[i];
+      if (tk && tk.t === 'o' && tk.v === '%') { v = { ...v, si: v.si / 100 }; i++; }
+      else if (tk && tk.t === 'u') { v = applyUnit(v, tk.v); i++; }
+      else break;
+    }
+    return neg ? { ...v, si: -v.si } : v;
   }
 
   function primary() {
@@ -109,13 +223,13 @@ function parseTokens(tokens, resolve) {
     if (tok.t === 'n') {
       i++;
       const n = parseFloat(tok.v);
-      return isNaN(n) ? 0 : n;
+      return { si: isNaN(n) ? 0 : n, dim: {}, unit: {} };
     }
     if (tok.t === 'r') {
       i++;
       const r = resolve(tok.ref);
       if (!r || r.err) fail();
-      return r.v;
+      return { si: r.si, dim: r.dim, unit: r.unit };
     }
     if (tok.t === 'p' && tok.v === '(') {
       i++;
@@ -151,10 +265,13 @@ function evaluateAll() {
     if (!t.length) r = null;
     else {
       try {
-        const v = parseTokens(t, evalLine);
-        r = isFinite(v) ? { v } : { err: 'Error' };
-      } catch {
-        r = { err: '—' };
+        const V = parseTokens(t, evalLine);
+        // r.v is the magnitude in the display unit (equals si when unitless).
+        r = isFinite(V.si)
+          ? { v: V.si / unitFactor(V.unit), si: V.si, dim: V.dim, unit: V.unit }
+          : { err: 'Error' };
+      } catch (e) {
+        r = { err: e === UNIT_ERR ? 'unit error' : '—' };
       }
     }
     visiting.delete(id);
@@ -190,6 +307,25 @@ function fmt(v) {
   if (a !== 0 && (a >= 1e15 || a < 1e-9)) s = n.toExponential(6).replace(/\.?0+e/, 'e');
   else s = n.toLocaleString('en-US', { maximumFractionDigits: 10 });
   return s.replace('-', '−');
+}
+
+// "km/h", "cm²", "kg·m/s²" — positive exponents, then a slash for negatives.
+function fmtUnit(unit) {
+  const sup = (e) => (e === 1 ? '' : e === 2 ? '²' : e === 3 ? '³' : '^' + e);
+  const pos = [];
+  const neg = [];
+  for (const [sym, e] of Object.entries(unit)) {
+    (e > 0 ? pos : neg).push(sym + sup(Math.abs(e)));
+  }
+  let s = pos.join('·');
+  if (neg.length) s = (s || '1') + '/' + neg.join('·');
+  return s;
+}
+
+// Full display of a result entry: magnitude plus unit ("15 cm").
+function fmtVal(r) {
+  const u = fmtUnit(r.unit);
+  return fmt(r.v) + (u ? ' ' + u : '');
 }
 
 // Display a number token as typed, with thousands grouping.
@@ -269,6 +405,20 @@ function inputOp(op) {
   insertToken({ t: 'o', v: op });
 }
 
+// Letters typed after a value build a unit token, validated live: a letter
+// is accepted only while the string remains a prefix of some known unit.
+function inputUnitLetter(ch) {
+  const line = activeLine();
+  if (state.sel) { state.caret = state.sel.idx + 1; state.sel = null; }
+  const prev = line.tokens[state.caret - 1];
+  if (prev && prev.t === 'u') {
+    const nv = prev.v + ch;
+    if (isUnitPrefix(nv)) prev.v = nv;
+    return;
+  }
+  if (isValue(prev) && isUnitPrefix(ch)) insertToken({ t: 'u', v: ch });
+}
+
 function inputPercent() {
   deselect();
   if (isValue(activeLine().tokens[state.caret - 1])) insertToken({ t: 'o', v: '%' });
@@ -312,7 +462,7 @@ function backspace() {
     return;
   }
   const prev = line.tokens[state.caret - 1];
-  if (prev.t === 'n' && prev.v.length > 1) prev.v = prev.v.slice(0, -1);
+  if ((prev.t === 'n' || prev.t === 'u') && prev.v.length > 1) prev.v = prev.v.slice(0, -1);
   else {
     line.tokens.splice(--state.caret, 1);
     mergeAt(line, state.caret);
@@ -376,12 +526,21 @@ function plainNum(v) {
 function removeLine(id) {
   const idx = state.lines.findIndex((l) => l.id === id);
   if (idx < 0) return;
-  // Freeze references to this line into plain numbers so dependents keep working.
+  // Freeze references to this line into literal tokens so dependents keep
+  // working: number + unit token for a simple unit, the SI magnitude for a
+  // compound one (which has no single unit token to freeze into).
   const r = results.get(id);
-  const frozen = r && !r.err ? plainNum(r.v) : '0';
+  let frozen = [{ t: 'n', v: '0' }];
+  if (r && !r.err) {
+    const syms = Object.entries(r.unit);
+    if (!syms.length) frozen = [{ t: 'n', v: plainNum(r.v) }];
+    else if (syms.length === 1 && syms[0][1] === 1) {
+      frozen = [{ t: 'n', v: plainNum(r.v) }, { t: 'u', v: syms[0][0] }];
+    } else frozen = [{ t: 'n', v: plainNum(r.si) }];
+  }
   for (const line of state.lines) {
-    line.tokens = line.tokens.map((t) =>
-      t.t === 'r' && t.ref === id ? { t: 'n', v: frozen } : t);
+    line.tokens = line.tokens.flatMap((t) =>
+      t.t === 'r' && t.ref === id ? frozen.map((f) => ({ ...f })) : t);
   }
   state.lines.splice(idx, 1);
   delete state.colors[id];
@@ -552,6 +711,7 @@ function press(key) {
   const before = snapshot();
   let kind = null;
   if (/^[0-9.]$/.test(key)) { inputDigit(key); kind = 'digit'; }
+  else if (/^[a-z]$/.test(key)) { inputUnitLetter(key); kind = 'digit'; }
   else if (key === '+' || key === '-' || key === '*' || key === '/') inputOp(key);
   else if (key === '%') inputPercent();
   else if (key === '(' || key === ')') inputParen(key);
@@ -595,11 +755,14 @@ function tokenEl(line, tok, i) {
   } else if (tok.t === 'p') {
     s.className = 'tok paren';
     s.textContent = tok.v;
+  } else if (tok.t === 'u') {
+    s.className = 'tok unit';
+    s.textContent = tok.v;
   } else if (tok.t === 'r') {
     s.className = 'tok ref' + (selected ? ' selected' : '');
     s.dataset.ref = tok.ref;
     const r = results.get(tok.ref);
-    const valText = r && !r.err ? fmt(r.v) : '…';
+    const valText = r && !r.err ? fmtVal(r) : '…';
     const src = state.lines.find((l) => l.id === tok.ref);
     if (src && src.label) {
       const rl = document.createElement('span');
@@ -676,7 +839,7 @@ function render() {
       resEl.appendChild(es);
       prevFmt.delete(line.id);
     } else {
-      const s = fmt(r.v);
+      const s = fmtVal(r);
       const ci = state.colors[line.id];
       if (ci !== undefined) {
         resEl.classList.add('tinted');
@@ -687,8 +850,15 @@ function render() {
       eq.textContent = '=';
       const val = document.createElement('span');
       val.className = 'val';
-      val.textContent = s;
+      val.textContent = fmt(r.v);
       resEl.append(eq, val);
+      const uStr = fmtUnit(r.unit);
+      if (uStr) {
+        const un = document.createElement('span');
+        un.className = 'runit';
+        un.textContent = uStr;
+        resEl.appendChild(un);
+      }
       resEl.title = 'Use this result';
       const pf = prevFmt.get(line.id);
       if (pf !== undefined && pf !== s && line.id !== state.activeId) {
@@ -983,7 +1153,10 @@ window.addEventListener('keydown', (e) => {
     x: '*', X: '*', '*': '*', '/': '/', '+': '+', '-': '-',
     '%': '%', '(': '(', ')': ')', '.': '.', ',': '.',
   };
-  const key = /^[0-9]$/.test(e.key) ? e.key : map[e.key];
+  let key;
+  if (/^[0-9]$/.test(e.key)) key = e.key;
+  else if (map[e.key] !== undefined) key = map[e.key];
+  else if (/^[a-zA-Z]$/.test(e.key)) key = e.key.toLowerCase(); // unit letters
   if (!key) return;
   e.preventDefault();
   press(key);
