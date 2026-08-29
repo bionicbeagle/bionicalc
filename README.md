@@ -20,10 +20,11 @@ Calculations form a flowing document instead of a single display:
   dependent results update on the fly.
 - **Hover to trace.** Hovering a result highlights every reference to it across the
   document (and hovering a reference chip lights up its source), in the line's color.
-- **Projects.** Tabs above the keypad hold separate pages of calculations, each with its
-  own undo history. Tap a tab to switch, tap the active tab to rename it, `+` for a new
-  project, and the active tab's `×` (tap twice) to delete one. Existing single-document
-  storage migrates into "Project 1" automatically.
+- **Projects and sheets.** Tabs above the keypad are projects; tabs above the
+  calculations are sheets within the current project ("drawers", "carcase", …). Every
+  sheet is its own page with its own undo history. Both tab bars work the same way: tap
+  to switch, tap the active tab to rename it, `+` to create, and the active tab's `×`
+  (tap twice) to delete. Older storage formats migrate automatically.
 - **Export / import.** Export downloads every project as a JSON file (backup, or moving
   work between devices); import adds a file's projects as new tabs and never overwrites
   what's already there.

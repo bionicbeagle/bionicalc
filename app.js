@@ -77,20 +77,19 @@ let results = new Map();  // lineId -> { v } | { err } | null (empty line)
 let prevFmt = new Map();  // lineId -> last displayed result, to flash changes
 
 /*
- * Projects: separate pages of calculations, shown as tabs above the keypad.
- * `state` always holds the CURRENT project's document (adoptProject swaps it
- * in by reference); each project keeps its own undo/redo stacks, rebound on
- * switch. References never cross projects.
+ * Projects and sheets: a project (tabs above the keypad) holds one or more
+ * sheets (tabs above the calculations) — e.g. "drawers" and "carcase" inside
+ * a "Bench" project. A SHEET is the document: `state` always holds the
+ * current sheet of the current project (adoptSheet swaps it in by
+ * reference), and each sheet keeps its own undo/redo stacks, rebound on
+ * switch. References never cross sheets.
  */
-let projects = [];          // [{id, name, lines, activeId, colors, nextId, nextColor}]
+let projects = [];          // [{id, name, sheets, currentSheetId, nextSheetId}]
 let currentProjectId = null;
 let nextProjectId = 1;
-const histories = new Map(); // projectId -> {undo, redo}
-let projRenameId = null;    // project tab being renamed (transient)
-let projDelArm = null;      // project id whose delete button is armed
-let projDelTimer;
+const histories = new Map(); // "projectId:sheetId" -> {undo, redo}
 
-let undoStack = [];         // the CURRENT project's stacks (see adoptProject)
+let undoStack = [];         // the CURRENT sheet's stacks (see adoptSheet)
 let redoStack = [];
 const HISTORY_MAX = 200;
 let lastKind = null;      // 'digit' | 'backspace' | null — for coalescing typing runs
@@ -724,13 +723,20 @@ function sizeLabelInput(inp) {
   inp.style.width = Math.max(inp.value.length, 5) + 1 + 'ch';
 }
 
-/* ================= projects ================= */
+/* ================= projects & sheets ================= */
 
-function freshProject() {
-  const id = nextProjectId++;
+const currentProject = () => projects.find((p) => p.id === currentProjectId);
+const currentSheet = () => {
+  const p = currentProject();
+  return p && p.sheets.find((s) => s.id === p.currentSheetId);
+};
+const historyKey = (pid, sid) => pid + ':' + sid;
+
+function freshSheet(p) {
+  const id = p.nextSheetId++;
   return {
     id,
-    name: 'Project ' + id,
+    name: 'Sheet ' + id,
     lines: [{ id: 1, tokens: [] }],
     activeId: 1,
     colors: {},
@@ -739,37 +745,47 @@ function freshProject() {
   };
 }
 
-// state and the current project's record share the same arrays, but undo's
-// restore() and "Clear all" rebind state fields — re-point the record.
-function syncCurrentProject() {
-  const p = projects.find((x) => x.id === currentProjectId);
-  if (!p) return;
-  p.lines = state.lines;
-  p.activeId = state.activeId;
-  p.colors = state.colors;
-  p.nextId = state.nextId;
-  p.nextColor = state.nextColor;
+function freshProject() {
+  const id = nextProjectId++;
+  const p = { id, name: 'Project ' + id, sheets: [], currentSheetId: 1, nextSheetId: 1 };
+  const s = freshSheet(p);
+  p.sheets.push(s);
+  p.currentSheetId = s.id;
+  return p;
 }
 
-// Make a project the working document: swap its fields into `state` and
+// state and the current sheet's record share the same arrays, but undo's
+// restore() and "Clear all" rebind state fields — re-point the record.
+function syncCurrentSheet() {
+  const s = currentSheet();
+  if (!s) return;
+  s.lines = state.lines;
+  s.activeId = state.activeId;
+  s.colors = state.colors;
+  s.nextId = state.nextId;
+  s.nextColor = state.nextColor;
+}
+
+// Make a sheet the working document: swap its fields into `state` and
 // rebind the undo/redo stacks to its own history.
-function adoptProject(id) {
-  const p = projects.find((x) => x.id === id);
-  if (!p) return;
-  currentProjectId = id;
-  state.lines = p.lines;
-  state.colors = p.colors;
-  state.nextId = p.nextId;
-  state.nextColor = p.nextColor;
-  state.activeId = p.lines.some((l) => l.id === p.activeId)
-    ? p.activeId
-    : p.lines[p.lines.length - 1].id;
+function adoptSheet(p, sheetId) {
+  const s = p.sheets.find((x) => x.id === sheetId) || p.sheets[0];
+  currentProjectId = p.id;
+  p.currentSheetId = s.id;
+  state.lines = s.lines;
+  state.colors = s.colors;
+  state.nextId = s.nextId;
+  state.nextColor = s.nextColor;
+  state.activeId = s.lines.some((l) => l.id === s.activeId)
+    ? s.activeId
+    : s.lines[s.lines.length - 1].id;
   state.caret = activeLine().tokens.length;
   state.sel = null;
-  let h = histories.get(id);
+  const key = historyKey(p.id, s.id);
+  let h = histories.get(key);
   if (!h) {
     h = { undo: [], redo: [] };
-    histories.set(id, h);
+    histories.set(key, h);
   }
   undoStack = h.undo;
   redoStack = h.redo;
@@ -778,20 +794,28 @@ function adoptProject(id) {
   hoverRefId = null;
   labelEditId = null;
   labelEditSnap = null;
+  projectBar.cancelRename();
+  sheetBar.cancelRename();
+}
+
+function adoptProject(id) {
+  const p = projects.find((x) => x.id === id);
+  if (!p) return;
+  adoptSheet(p, p.currentSheetId);
 }
 
 function switchProject(id) {
   if (id === currentProjectId || !projects.some((p) => p.id === id)) return;
   commitLabelEditFromDom();
   closeUnitPop();
-  syncCurrentProject();
+  syncCurrentSheet();
   adoptProject(id);
   update();
 }
 
 function newProject() {
   commitLabelEditFromDom();
-  syncCurrentProject();
+  syncCurrentSheet();
   const p = freshProject();
   projects.push(p);
   adoptProject(p.id);
@@ -801,8 +825,8 @@ function newProject() {
 function deleteProject(id) {
   const idx = projects.findIndex((p) => p.id === id);
   if (idx < 0) return;
+  for (const s of projects[idx].sheets) histories.delete(historyKey(id, s.id));
   projects.splice(idx, 1);
-  histories.delete(id);
   if (!projects.length) projects.push(freshProject());
   if (currentProjectId === id) {
     adoptProject(projects[Math.min(Math.max(0, idx - 1), projects.length - 1)].id);
@@ -810,17 +834,65 @@ function deleteProject(id) {
   update();
 }
 
-function startProjectRename(id) {
+function renameProject(id, raw) {
+  const p = projects.find((x) => x.id === id);
+  if (p) {
+    const name = raw.trim().slice(0, 24);
+    if (name) p.name = name;
+  }
+  update();
+}
+
+function switchSheet(sheetId) {
+  const p = currentProject();
+  if (!p || sheetId === p.currentSheetId || !p.sheets.some((s) => s.id === sheetId)) return;
   commitLabelEditFromDom();
-  projRenameId = id;
-  render();
+  closeUnitPop();
+  syncCurrentSheet();
+  adoptSheet(p, sheetId);
+  update();
+}
+
+function newSheet() {
+  const p = currentProject();
+  if (!p) return;
+  commitLabelEditFromDom();
+  syncCurrentSheet();
+  const s = freshSheet(p);
+  p.sheets.push(s);
+  adoptSheet(p, s.id);
+  update();
+}
+
+function deleteSheet(sheetId) {
+  const p = currentProject();
+  if (!p) return;
+  const idx = p.sheets.findIndex((s) => s.id === sheetId);
+  if (idx < 0) return;
+  p.sheets.splice(idx, 1);
+  histories.delete(historyKey(p.id, sheetId));
+  if (!p.sheets.length) p.sheets.push(freshSheet(p));
+  if (p.currentSheetId === sheetId) {
+    adoptSheet(p, p.sheets[Math.min(Math.max(0, idx - 1), p.sheets.length - 1)].id);
+  }
+  update();
+}
+
+function renameSheet(sheetId, raw) {
+  const p = currentProject();
+  const s = p && p.sheets.find((x) => x.id === sheetId);
+  if (s) {
+    const name = raw.trim().slice(0, 24);
+    if (name) s.name = name;
+  }
+  update();
 }
 
 /* ---- export / import ---- */
 
 function exportProjects() {
   commitLabelEditFromDom();
-  syncCurrentProject();
+  syncCurrentSheet();
   const payload = {
     app: 'bionicalc',
     version: 1,
@@ -841,13 +913,39 @@ function exportProjects() {
 }
 
 // Imported projects are APPENDED as new tabs — an import can never overwrite
-// or delete what's already on the device. Returns how many were added.
+// or delete what's already on the device. Accepts the current format
+// (projects with sheets), the previous one (documents at the project level),
+// and the original single-document files. Returns how many were added.
 function importProjectsFromData(d) {
   const okTok = (t) => !!t && (
     ((t.t === 'n' || t.t === 'u') && typeof t.v === 'string') ||
     (t.t === 'o' && ['+', '-', '*', '/', '%'].includes(t.v)) ||
     (t.t === 'p' && (t.v === '(' || t.v === ')')) ||
     (t.t === 'r' && typeof t.ref === 'number'));
+  const cleanName = (raw, fallback) => String(raw || '').trim().slice(0, 24) || fallback;
+
+  const sanitizeDoc = (src) => {
+    if (!src || !Array.isArray(src.lines)) return null;
+    const lines = src.lines
+      .filter((l) => l && typeof l.id === 'number' && Array.isArray(l.tokens))
+      .map((l) => ({
+        id: l.id,
+        tokens: l.tokens.filter(okTok).map((t) => ({ ...t })),
+        ...(l.label ? { label: String(l.label).slice(0, 24) } : {}),
+      }));
+    if (!lines.length) return null;
+    const colors = {};
+    for (const [k, v] of Object.entries(src.colors || {})) {
+      if (Number.isInteger(v)) colors[k] = ((v % PALETTE.length) + PALETTE.length) % PALETTE.length;
+    }
+    return {
+      lines,
+      activeId: src.activeId,
+      colors,
+      nextId: Number(src.nextId) || Math.max(...lines.map((l) => l.id)) + 1,
+      nextColor: Number(src.nextColor) || 0,
+    };
+  };
 
   let incoming = [];
   if (d && Array.isArray(d.projects)) incoming = d.projects;
@@ -855,48 +953,36 @@ function importProjectsFromData(d) {
 
   const added = [];
   for (const p of incoming) {
-    if (!p || !Array.isArray(p.lines)) continue;
-    const lines = p.lines
-      .filter((l) => l && typeof l.id === 'number' && Array.isArray(l.tokens))
-      .map((l) => ({
-        id: l.id,
-        tokens: l.tokens.filter(okTok).map((t) => ({ ...t })),
-        ...(l.label ? { label: String(l.label).slice(0, 24) } : {}),
-      }));
-    if (!lines.length) continue;
-    const colors = {};
-    for (const [k, v] of Object.entries(p.colors || {})) {
-      if (Number.isInteger(v)) colors[k] = ((v % PALETTE.length) + PALETTE.length) % PALETTE.length;
+    if (!p) continue;
+    const srcSheets = Array.isArray(p.sheets)
+      ? p.sheets
+      : [{ lines: p.lines, activeId: p.activeId, colors: p.colors, nextId: p.nextId, nextColor: p.nextColor }];
+    const sheets = [];
+    let sheetId = 1;
+    for (const s of srcSheets) {
+      const doc = sanitizeDoc(s);
+      if (!doc) continue;
+      const sid = sheetId++;
+      sheets.push({ id: sid, name: cleanName(s && s.name, 'Sheet ' + sid), ...doc });
     }
+    if (!sheets.length) continue;
     added.push({
       id: nextProjectId++,
-      name: String(p.name || 'Imported').trim().slice(0, 24) || 'Imported',
-      lines,
-      activeId: p.activeId,
-      colors,
-      nextId: Number(p.nextId) || Math.max(...lines.map((l) => l.id)) + 1,
-      nextColor: Number(p.nextColor) || 0,
+      name: cleanName(p.name, 'Imported'),
+      sheets,
+      currentSheetId: sheets[0].id,
+      nextSheetId: sheetId,
     });
   }
   if (!added.length) return 0;
   commitLabelEditFromDom();
-  syncCurrentProject();
+  syncCurrentSheet();
   projects.push(...added);
   adoptProject(added[0].id);
   update();
   return added.length;
 }
 
-function renameProject(id, raw) {
-  if (projRenameId !== id) return;
-  projRenameId = null;
-  const p = projects.find((x) => x.id === id);
-  if (p) {
-    const name = raw.trim().slice(0, 24);
-    if (name) p.name = name;
-  }
-  update();
-}
 
 function press(key) {
   if (!activeLine()) {
@@ -1111,7 +1197,8 @@ function render() {
     }
   });
 
-  renderProjects();
+  projectBar.render();
+  sheetBar.render();
 
   if (labelEditId !== null) {
     const inp = linesEl.querySelector('.label-input');
@@ -1140,66 +1227,143 @@ function render() {
   applyRefHighlight();
 }
 
-/* ---- project tabs ---- */
+/* ---- tab bars: projects above the keypad, sheets above the canvas ---- */
 
-function renderProjects() {
-  const cont = document.getElementById('projtabs');
-  cont.textContent = '';
-  for (const p of projects) {
-    const tab = document.createElement('div');
-    tab.className = 'ptab' + (p.id === currentProjectId ? ' active' : '');
-    tab.dataset.pid = p.id;
-    if (projRenameId === p.id) {
-      const inp = document.createElement('input');
-      inp.value = p.name;
-      inp.maxLength = 24;
-      inp.spellcheck = false;
-      tab.appendChild(inp);
-    } else {
-      const nm = document.createElement('span');
-      nm.className = 'pname';
-      nm.textContent = p.name;
-      tab.appendChild(nm);
-      if (p.id === currentProjectId) {
-        tab.title = 'Tap again to rename';
-        const del = document.createElement('button');
-        del.className = 'pdel' + (projDelArm === p.id ? ' armed' : '');
-        del.textContent = projDelArm === p.id ? 'sure?' : '×';
-        del.title = 'Delete this project';
-        tab.appendChild(del);
+// Both bars share one behavior: tap to switch, tap the active tab to rename
+// it inline, + to create, and the active tab's × to delete (two-tap confirm).
+function makeTabBar(container, cfg) {
+  let renameId = null;
+  let delArm = null;
+  let delTimer;
+
+  function commitRename(id, value) {
+    if (renameId !== id) return;
+    renameId = null;
+    cfg.rename(id, value);
+  }
+
+  function renderBar() {
+    const items = cfg.items();
+    if (renameId !== null && !items.some((it) => it.id === renameId)) renameId = null;
+    container.textContent = '';
+    for (const it of items) {
+      const active = it.id === cfg.currentId();
+      const tab = document.createElement('div');
+      tab.className = 'ptab' + (active ? ' active' : '');
+      tab.dataset.tid = it.id;
+      if (renameId === it.id) {
+        const inp = document.createElement('input');
+        inp.value = it.name;
+        inp.maxLength = 24;
+        inp.spellcheck = false;
+        tab.appendChild(inp);
       } else {
-        tab.title = 'Switch to ' + p.name;
+        const nm = document.createElement('span');
+        nm.className = 'pname';
+        nm.textContent = it.name;
+        tab.appendChild(nm);
+        if (active) {
+          tab.title = 'Tap again to rename';
+          const del = document.createElement('button');
+          del.className = 'pdel' + (delArm === it.id ? ' armed' : '');
+          del.textContent = delArm === it.id ? 'sure?' : '×';
+          del.title = cfg.deleteTitle;
+          tab.appendChild(del);
+        } else {
+          tab.title = 'Switch to ' + it.name;
+        }
+      }
+      container.appendChild(tab);
+    }
+    const add = document.createElement('button');
+    add.className = 'padd';
+    add.textContent = '+';
+    add.title = cfg.addTitle;
+    container.appendChild(add);
+
+    if (renameId !== null) {
+      const inp = container.querySelector('.ptab input');
+      if (inp) {
+        const id = renameId;
+        const size = () => { inp.style.width = Math.max(inp.value.length, 4) + 2 + 'ch'; };
+        size();
+        inp.addEventListener('input', size);
+        inp.addEventListener('keydown', (e) => {
+          e.stopPropagation();
+          if (e.key === 'Enter') commitRename(id, inp.value);
+          else if (e.key === 'Escape') {
+            renameId = null;
+            renderBar();
+          }
+        });
+        inp.addEventListener('blur', () => commitRename(id, inp.value));
+        inp.focus();
+        inp.select();
       }
     }
-    cont.appendChild(tab);
   }
-  const add = document.createElement('button');
-  add.className = 'padd';
-  add.textContent = '+';
-  add.title = 'New project';
-  cont.appendChild(add);
 
-  if (projRenameId !== null) {
-    const inp = cont.querySelector('.ptab input');
-    if (inp) {
-      const id = projRenameId;
-      const size = () => { inp.style.width = Math.max(inp.value.length, 4) + 2 + 'ch'; };
-      size();
-      inp.addEventListener('input', size);
-      inp.addEventListener('keydown', (e) => {
-        e.stopPropagation();
-        if (e.key === 'Enter') renameProject(id, inp.value);
-        else if (e.key === 'Escape') {
-          projRenameId = null;
-          render();
-        }
-      });
-      inp.addEventListener('blur', () => renameProject(id, inp.value));
-      inp.focus();
-      inp.select();
+  container.addEventListener('click', (e) => {
+    if (e.target.closest('input')) return;
+    if (e.target.closest('.padd')) {
+      cfg.create();
+      return;
     }
-  }
+    const tab = e.target.closest('.ptab');
+    if (!tab) return;
+    const tid = Number(tab.dataset.tid);
+    if (e.target.closest('.pdel')) {
+      if (delArm === tid) {
+        clearTimeout(delTimer);
+        delArm = null;
+        cfg.remove(tid);
+      } else {
+        delArm = tid;
+        clearTimeout(delTimer);
+        delTimer = setTimeout(() => {
+          delArm = null;
+          renderBar();
+        }, 2500);
+        renderBar();
+      }
+      return;
+    }
+    if (tid === cfg.currentId()) {
+      commitLabelEditFromDom();
+      renameId = tid;
+      renderBar();
+    } else {
+      cfg.switchTo(tid);
+    }
+  });
+
+  return {
+    render: renderBar,
+    cancelRename() { renameId = null; },
+  };
 }
+
+const projectBar = makeTabBar(document.getElementById('projtabs'), {
+  items: () => projects,
+  currentId: () => currentProjectId,
+  switchTo: switchProject,
+  create: newProject,
+  remove: deleteProject,
+  rename: renameProject,
+  addTitle: 'New project',
+  deleteTitle: 'Delete this project',
+});
+
+const sheetBar = makeTabBar(document.getElementById('sheettabs'), {
+  items: () => (currentProject() ? currentProject().sheets : []),
+  currentId: () => (currentProject() ? currentProject().currentSheetId : null),
+  switchTo: switchSheet,
+  create: newSheet,
+  remove: deleteSheet,
+  rename: renameSheet,
+  addTitle: 'New sheet',
+  deleteTitle: 'Delete this sheet',
+});
 
 /* ---- hover: light up a result and every reference to it ---- */
 
@@ -1233,7 +1397,7 @@ function setRefHighlight(id) {
 /* ================= persistence ================= */
 
 function save() {
-  syncCurrentProject();
+  syncCurrentSheet();
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify({
       projects,
@@ -1242,6 +1406,41 @@ function save() {
       quickUnits,
     }));
   } catch { /* storage unavailable — run without persistence */ }
+}
+
+const validSheet = (s) => s && Array.isArray(s.lines) && s.lines.length;
+
+// Bring any older stored project record up to the current shape: a document
+// stored at the project level moves into that project's single sheet.
+function migrateProject(p) {
+  if (!p) return null;
+  if (Array.isArray(p.sheets)) {
+    const sheets = p.sheets.filter(validSheet);
+    if (!sheets.length) return null;
+    return {
+      id: p.id,
+      name: p.name,
+      sheets,
+      currentSheetId: sheets.some((s) => s.id === p.currentSheetId) ? p.currentSheetId : sheets[0].id,
+      nextSheetId: Number(p.nextSheetId) || Math.max(...sheets.map((s) => s.id)) + 1,
+    };
+  }
+  if (!Array.isArray(p.lines) || !p.lines.length) return null;
+  return {
+    id: p.id,
+    name: p.name,
+    sheets: [{
+      id: 1,
+      name: 'Sheet 1',
+      lines: p.lines,
+      activeId: p.activeId,
+      colors: p.colors || {},
+      nextId: p.nextId || Math.max(...p.lines.map((l) => l.id)) + 1,
+      nextColor: p.nextColor || 0,
+    }],
+    currentSheetId: 1,
+    nextSheetId: 2,
+  };
 }
 
 function load() {
@@ -1253,21 +1452,17 @@ function load() {
       if (valid.length) quickUnits = valid.slice(0, 4);
     }
     if (d && Array.isArray(d.projects) && d.projects.length) {
-      projects = d.projects.filter((p) => p && Array.isArray(p.lines) && p.lines.length);
-      nextProjectId = d.nextProjectId || Math.max(...projects.map((p) => p.id)) + 1;
+      projects = d.projects.map(migrateProject).filter(Boolean);
+      nextProjectId = d.nextProjectId
+        || (projects.length ? Math.max(...projects.map((p) => p.id)) + 1 : 1);
       currentId = d.currentId;
     } else if (d && Array.isArray(d.lines) && d.lines.length) {
-      // migrate the old single-document storage into the first project
-      projects = [{
-        id: 1,
-        name: 'Project 1',
-        lines: d.lines,
-        activeId: d.activeId,
-        colors: d.colors || {},
-        nextId: d.nextId || Math.max(...d.lines.map((l) => l.id)) + 1,
-        nextColor: d.nextColor || 0,
-      }];
-      nextProjectId = 2;
+      // the original single-document storage
+      const p = migrateProject({ id: 1, name: 'Project 1', ...d });
+      if (p) {
+        projects = [p];
+        nextProjectId = 2;
+      }
     }
   } catch { /* corrupt state — start fresh */ }
   if (!projects.length) projects = [freshProject()];
@@ -1522,34 +1717,6 @@ document.getElementById('more-units').addEventListener('click', () => {
   unitPop.hidden = !unitPop.hidden;
 });
 
-document.getElementById('projtabs').addEventListener('click', (e) => {
-  if (e.target.closest('input')) return;
-  if (e.target.closest('.padd')) {
-    newProject();
-    return;
-  }
-  const tab = e.target.closest('.ptab');
-  if (!tab) return;
-  const pid = Number(tab.dataset.pid);
-  if (e.target.closest('.pdel')) {
-    if (projDelArm === pid) {
-      clearTimeout(projDelTimer);
-      projDelArm = null;
-      deleteProject(pid);
-    } else {
-      projDelArm = pid;
-      clearTimeout(projDelTimer);
-      projDelTimer = setTimeout(() => {
-        projDelArm = null;
-        render();
-      }, 2500);
-      render();
-    }
-    return;
-  }
-  if (pid === currentProjectId) startProjectRename(pid);
-  else switchProject(pid);
-});
 
 window.addEventListener('pointerdown', (e) => {
   if (unitPop.hidden || !e.target.closest) return;
@@ -1616,13 +1783,16 @@ load();
 save(); // persist immediately so a migrated document is stored in the new format
 render();
 
-// Debug/console access. Getters because the stacks are rebound per project.
+// Debug/console access. Getters because the stacks are rebound per sheet.
 window.__bionicalc = {
   state,
   evaluateAll,
   switchProject,
+  switchSheet,
+  newSheet,
   get projects() { return projects; },
   get currentProjectId() { return currentProjectId; },
+  get currentSheet() { return currentSheet(); },
   get undoStack() { return undoStack; },
   get redoStack() { return redoStack; },
 };

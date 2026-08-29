@@ -324,10 +324,10 @@ check('project 2 document kept across switches', res(0), 42);
 check('project 2 undo stack kept across switches', t('undoStack.length'), 1);
 t('undo()');
 check('undo stays inside project 2', res(0), null);
-check('project 1 still untouched by that undo', t(`projects.find(p => p.id === ${p1}).lines.length`), p1Lines);
+check('project 1 still untouched by that undo', t(`projects.find(p => p.id === ${p1}).sheets[0].lines.length`), p1Lines);
 
 // 37. Rename (trimmed) and delete (falls back to the neighbor)
-t('projRenameId = currentProjectId; renameProject(currentProjectId, "  Bench  ");');
+t('renameProject(currentProjectId, "  Bench  ");');
 check('rename trims and applies', t('projects[1].name'), 'Bench');
 t('deleteProject(currentProjectId)');
 check('delete removes the project', t('projects.length'), 1);
@@ -359,7 +359,39 @@ check('adopted document is project 1', t('state.lines.length'), p1Lines);
   check('migration: one project', m('projects.length'), 1);
   check('migration: document intact', m('results.get(state.lines[0].id).v'), 7);
   check('migration: named', m('projects[0].name'), 'Project 1');
-  check('migration: saved in new format', m('JSON.parse(localStorage.getItem("bionicalc.v1")).projects.length'), 1);
+  check('migration: wrapped into one sheet', m('projects[0].sheets.length'), 1);
+  check('migration: saved with sheets', m('JSON.parse(localStorage.getItem("bionicalc.v1")).projects[0].sheets.length'), 1);
+}
+
+// 38b. The previous format (documents at the project level) migrates too
+{
+  const stored = {
+    data: JSON.stringify({
+      projects: [{
+        id: 3, name: 'Bench',
+        lines: [{ id: 1, tokens: [{ t: 'n', v: '5' }] }],
+        activeId: 1, colors: {}, nextId: 2, nextColor: 0,
+      }],
+      currentId: 3, nextProjectId: 4,
+    }),
+  };
+  const sb = {
+    console, setTimeout, clearTimeout,
+    document: { getElementById: () => el(), createElement: () => el() },
+    window: { addEventListener() {} },
+    navigator: { platform: 'MacIntel' },
+    localStorage: {
+      getItem: () => stored.data,
+      setItem: (k, v) => { stored.data = v; },
+    },
+  };
+  sb.window.window = sb.window;
+  const ctx3 = vm.createContext(sb);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, 'app.js'), 'utf8'), ctx3, { filename: 'app.js' });
+  const m = (c) => vm.runInContext(c, ctx3);
+  check('sheetless project migrates', m('projects[0].sheets.length'), 1);
+  check('project name kept through migration', m('projects[0].name'), 'Bench');
+  check('migrated sheet evaluates', m('results.get(state.lines[0].id).v'), 5);
 }
 
 // 39. Import appends sanitized projects (never overwrites)
@@ -395,5 +427,43 @@ check('legacy single-doc import wraps',
   t('importProjectsFromData({ lines: [{ id: 1, tokens: [{ t: "n", v: "9" }] }] })'), 1);
 check('legacy import named', t('projects[projects.length - 1].name'), 'Imported');
 check('legacy import evaluates', res(0), 9);
+
+// 41. Sheets: separate pages within a project, each with its own undo
+check('project starts with one sheet', t('currentProject().sheets.length'), 1);
+const s1Undo = t('undoStack.length');
+t('newSheet()');
+check('sheet added and adopted', t('currentProject().sheets.length'), 2);
+check('fresh sheet is empty', res(0), null);
+check('fresh sheet has a fresh undo stack', t('undoStack.length'), 0);
+keys(['7']);
+check('typing lands in the new sheet', res(0), 7);
+t('switchSheet(currentProject().sheets[0].id)');
+check('first sheet restored', res(0), 9);
+check('first sheet undo untouched', t('undoStack.length'), s1Undo);
+t('switchSheet(currentProject().sheets[1].id)');
+check('second sheet kept across switches', res(0), 7);
+check('second sheet undo kept', t('undoStack.length'), 1);
+t('renameSheet(currentProject().currentSheetId, "  Drawers  ")');
+check('sheet renamed and trimmed', t('currentSheet().name'), 'Drawers');
+t('deleteSheet(currentProject().currentSheetId)');
+check('sheet deleted', t('currentProject().sheets.length'), 1);
+check('neighbor sheet adopted', res(0), 9);
+
+// 42. Importing the current format preserves sheets
+const nf = {
+  projects: [{
+    name: 'NewFmt',
+    sheets: [
+      { name: 'Carcase', lines: [{ id: 1, tokens: [{ t: 'n', v: '3' }] }] },
+      { name: 'Drawers', lines: [{ id: 1, tokens: [{ t: 'n', v: '4' }] }] },
+    ],
+  }],
+};
+check('sheeted import accepted', t(`importProjectsFromData(${JSON.stringify(nf)})`), 1);
+check('sheets preserved on import', t('currentProject().sheets.length'), 2);
+check('sheet names preserved', t('currentProject().sheets.map(s => s.name).join(",")'), 'Carcase,Drawers');
+check('first imported sheet adopted', res(0), 3);
+t('switchSheet(currentProject().sheets[1].id)');
+check('second imported sheet evaluates', res(0), 4);
 
 process.exit(failures ? 1 : 0);

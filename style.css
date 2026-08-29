@@ -447,6 +447,19 @@ main {
   gap: 8px;
 }
 
+#sheettabs {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: 780px;
+  margin: 0 auto 12px;
+  padding: 2px 0 10px;
+  background: var(--bg);
+}
+
 .ptab {
   display: flex;
   align-items: center;
