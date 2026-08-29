@@ -88,3 +88,7 @@ No dependencies — the suite stubs the DOM, loads the real `app.js`, and drives
 input handlers: arithmetic and precedence, live reference propagation, reordering with
 forward references, cycle rejection (and non-termination defense), labels, undo/redo
 coalescing, line deletion freezing/restoring references, and number formatting.
+
+## License & author
+
+© 2026 [@bionicbeagle](https://github.com/bionicbeagle)
